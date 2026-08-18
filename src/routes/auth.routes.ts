@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
 import { authenticate } from "../middleware/auth.middleware";
+import { prisma } from "../lib/prisma";
 
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || "rewore_secret_key_change_in_prod";
@@ -19,27 +20,6 @@ const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
 });
-
-// ─── Helper ───────────────────────────────────────────────────────────────────
-// NOTE: Khi Prisma đã được setup đầy đủ, import PrismaClient từ generated/prisma
-// và thay thế mock data bên dưới bằng Prisma queries
-
-// Temporary in-memory store (replace with Prisma when DB is ready)
-const inMemoryUsers: Array<{
-  id: string;
-  email: string;
-  password: string;
-  name: string;
-  avatar: string | null;
-  role: string;
-  reputation: number;
-  totalSales: number;
-  totalBids: number;
-  isVerified: boolean;
-  createdAt: Date;
-}> = [];
-
-const generateId = () => Math.random().toString(36).substring(2, 11);
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
@@ -83,42 +63,30 @@ router.post("/register", async (req: Request, res: Response, next: NextFunction)
 
     const { email, password, name } = parsed.data;
 
-    // Check email exists
-    const existing = inMemoryUsers.find((u) => u.email === email);
+    const existing = await prisma.user.findUnique({ where: { email } });
     if (existing) {
       res.status(400).json({ success: false, message: "Email đã được sử dụng" });
       return;
     }
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, 12);
 
-    // Create user
-    const newUser = {
-      id: generateId(),
-      email,
-      password: hashedPassword,
-      name,
-      avatar: null,
-      role: "BUYER",
-      reputation: 0,
-      totalSales: 0,
-      totalBids: 0,
-      isVerified: false,
-      createdAt: new Date(),
-    };
-    inMemoryUsers.push(newUser);
+    const user = await prisma.user.create({
+      data: { email, password: hashedPassword, name },
+      select: {
+        id: true, email: true, name: true, avatar: true, bio: true,
+        phone: true, address: true, role: true, reputation: true,
+        totalSales: true, totalBids: true, isVerified: true, createdAt: true,
+      },
+    });
 
-    // Generate token
     const token = jwt.sign(
-      { userId: newUser.id, email: newUser.email, role: newUser.role },
+      { userId: user.id, email: user.email, role: user.role },
       JWT_SECRET,
       { expiresIn: JWT_EXPIRES_IN } as jwt.SignOptions
     );
 
-    const { password: _pwd, ...userWithoutPassword } = newUser;
-
-    res.status(201).json({ success: true, token, user: userWithoutPassword });
+    res.status(201).json({ success: true, token, user });
   } catch (err) {
     next(err);
   }
@@ -145,10 +113,6 @@ router.post("/register", async (req: Request, res: Response, next: NextFunction)
  *               $ref: '#/components/schemas/AuthResponse'
  *       401:
  *         description: Sai email hoặc mật khẩu
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.post("/login", async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -160,7 +124,7 @@ router.post("/login", async (req: Request, res: Response, next: NextFunction) =>
 
     const { email, password } = parsed.data;
 
-    const user = inMemoryUsers.find((u) => u.email === email);
+    const user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
       res.status(401).json({ success: false, message: "Email hoặc mật khẩu không đúng" });
       return;
@@ -179,7 +143,6 @@ router.post("/login", async (req: Request, res: Response, next: NextFunction) =>
     );
 
     const { password: _pwd, ...userWithoutPassword } = user;
-
     res.json({ success: true, token, user: userWithoutPassword });
   } catch (err) {
     next(err);
@@ -197,26 +160,29 @@ router.post("/login", async (req: Request, res: Response, next: NextFunction) =>
  *     responses:
  *       200:
  *         description: Thông tin user
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 user:
- *                   $ref: '#/components/schemas/User'
  *       401:
  *         description: Unauthorized
  */
-router.get("/me", authenticate, (req: Request, res: Response) => {
-  const user = inMemoryUsers.find((u) => u.id === req.user!.userId);
-  if (!user) {
-    res.status(404).json({ success: false, message: "User not found" });
-    return;
+router.get("/me", authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user!.userId },
+      select: {
+        id: true, email: true, name: true, avatar: true, bio: true,
+        phone: true, address: true, role: true, reputation: true,
+        totalSales: true, totalBids: true, isVerified: true, createdAt: true,
+      },
+    });
+
+    if (!user) {
+      res.status(404).json({ success: false, message: "User not found" });
+      return;
+    }
+
+    res.json({ success: true, user });
+  } catch (err) {
+    next(err);
   }
-  const { password: _pwd, ...userWithoutPassword } = user;
-  res.json({ success: true, user: userWithoutPassword });
 });
 
 /**
@@ -232,7 +198,6 @@ router.get("/me", authenticate, (req: Request, res: Response) => {
  *         description: Đăng xuất thành công
  */
 router.post("/logout", authenticate, (_req: Request, res: Response) => {
-  // JWT is stateless — client should delete the token
   res.json({ success: true, message: "Đăng xuất thành công. Vui lòng xóa token phía client." });
 });
 

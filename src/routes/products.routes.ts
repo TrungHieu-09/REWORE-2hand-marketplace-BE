@@ -1,12 +1,10 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { authenticate } from "../middleware/auth.middleware";
+import { prisma } from "../lib/prisma";
+import { Prisma } from "@prisma/client";
 
 const router = Router();
-
-// Mock store (replace with Prisma)
-const products: Array<Record<string, unknown>> = [];
-const generateId = () => Math.random().toString(36).substring(2, 11);
 
 const createProductSchema = z.object({
   title: z.string().min(3, "Tên sản phẩm tối thiểu 3 ký tự"),
@@ -21,6 +19,13 @@ const createProductSchema = z.object({
   tags: z.array(z.string()).optional().default([]),
 });
 
+const productInclude = {
+  seller: {
+    select: { id: true, name: true, avatar: true, reputation: true, isVerified: true },
+  },
+  _count: { select: { wishlistItems: true } },
+};
+
 /**
  * @openapi
  * /api/products:
@@ -30,82 +35,69 @@ const createProductSchema = z.object({
  *     parameters:
  *       - in: query
  *         name: page
- *         schema:
- *           type: integer
- *           default: 1
+ *         schema: { type: integer, default: 1 }
  *       - in: query
  *         name: limit
- *         schema:
- *           type: integer
- *           default: 12
+ *         schema: { type: integer, default: 12 }
  *       - in: query
  *         name: category
- *         schema:
- *           type: string
- *         description: Filter theo danh mục
+ *         schema: { type: string }
  *       - in: query
  *         name: condition
- *         schema:
- *           type: string
- *           enum: [NEW, LIKE_NEW, GOOD, FAIR, POOR]
+ *         schema: { type: string, enum: [NEW, LIKE_NEW, GOOD, FAIR, POOR] }
  *       - in: query
  *         name: minPrice
- *         schema:
- *           type: number
+ *         schema: { type: number }
  *       - in: query
  *         name: maxPrice
- *         schema:
- *           type: number
+ *         schema: { type: number }
  *       - in: query
  *         name: search
- *         schema:
- *           type: string
- *         description: Tìm kiếm theo tên, mô tả
+ *         schema: { type: string }
  *       - in: query
  *         name: sellerId
- *         schema:
- *           type: string
- *         description: Filter theo seller
+ *         schema: { type: string }
  *       - in: query
  *         name: sortBy
- *         schema:
- *           type: string
- *           enum: [price_asc, price_desc, newest, popular]
- *           default: newest
+ *         schema: { type: string, enum: [price_asc, price_desc, newest, popular] }
  *     responses:
  *       200:
  *         description: Danh sách sản phẩm
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 data:
- *                   type: array
- *                   items:
- *                     $ref: '#/components/schemas/Product'
- *                 meta:
- *                   $ref: '#/components/schemas/PaginationMeta'
  */
-router.get("/", (_req: Request, res: Response) => {
-  // TODO: Add Prisma query with filters
-  const page = parseInt(String(_req.query.page || 1));
-  const limit = parseInt(String(_req.query.limit || 12));
-  const start = (page - 1) * limit;
-  const data = products.slice(start, start + limit);
+router.get("/", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const page = Math.max(1, parseInt(String(req.query.page || 1)));
+    const limit = Math.min(50, parseInt(String(req.query.limit || 12)));
+    const { category, condition, minPrice, maxPrice, search, sellerId, sortBy } = req.query;
 
-  res.json({
-    success: true,
-    data,
-    meta: {
-      total: products.length,
-      page,
-      limit,
-      totalPages: Math.ceil(products.length / limit),
-    },
-  });
+    const where: Prisma.ProductWhereInput = {
+      status: "ACTIVE",
+      ...(category && { category: category as string }),
+      ...(condition && { condition: condition as Prisma.EnumProductConditionFilter }),
+      ...(sellerId && { sellerId: sellerId as string }),
+      ...(minPrice || maxPrice ? { price: { ...(minPrice && { gte: Number(minPrice) }), ...(maxPrice && { lte: Number(maxPrice) }) } } : {}),
+      ...(search && {
+        OR: [
+          { title: { contains: search as string, mode: "insensitive" } },
+          { description: { contains: search as string, mode: "insensitive" } },
+          { brand: { contains: search as string, mode: "insensitive" } },
+        ],
+      }),
+    };
+
+    const orderBy: Prisma.ProductOrderByWithRelationInput =
+      sortBy === "price_asc" ? { price: "asc" }
+      : sortBy === "price_desc" ? { price: "desc" }
+      : sortBy === "popular" ? { viewCount: "desc" }
+      : { createdAt: "desc" };
+
+    const [data, total] = await Promise.all([
+      prisma.product.findMany({ where, include: productInclude, skip: (page - 1) * limit, take: limit, orderBy }),
+      prisma.product.count({ where }),
+    ]);
+
+    res.json({ success: true, data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -118,30 +110,26 @@ router.get("/", (_req: Request, res: Response) => {
  *       - in: path
  *         name: id
  *         required: true
- *         schema:
- *           type: string
+ *         schema: { type: string }
  *     responses:
  *       200:
  *         description: Chi tiết sản phẩm
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 data:
- *                   $ref: '#/components/schemas/Product'
  *       404:
  *         description: Không tìm thấy
  */
-router.get("/:id", (req: Request, res: Response) => {
-  const product = products.find((p) => p["id"] === req.params.id);
-  if (!product) {
-    res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" });
-    return;
-  }
-  res.json({ success: true, data: product });
+router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const product = await prisma.product.findUnique({
+      where: { id: req.params.id },
+      include: { ...productInclude, auction: true },
+    });
+    if (!product) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
+
+    // Tăng view count
+    await prisma.product.update({ where: { id: req.params.id }, data: { viewCount: { increment: 1 } } });
+
+    res.json({ success: true, data: product });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -161,45 +149,21 @@ router.get("/:id", (req: Request, res: Response) => {
  *     responses:
  *       201:
  *         description: Tạo thành công
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 data:
- *                   $ref: '#/components/schemas/Product'
  *       400:
  *         description: Validation error
  */
-router.post("/", authenticate, (req: Request, res: Response, next: NextFunction) => {
+router.post("/", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const parsed = createProductSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        message: "Validation error",
-        errors: parsed.error.flatten().fieldErrors,
-      });
-      return;
+      res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors }); return;
     }
-
-    const newProduct = {
-      id: generateId(),
-      ...parsed.data,
-      status: "ACTIVE",
-      viewCount: 0,
-      sellerId: req.user!.userId,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-    products.push(newProduct);
-
-    res.status(201).json({ success: true, data: newProduct });
-  } catch (err) {
-    next(err);
-  }
+    const product = await prisma.product.create({
+      data: { ...parsed.data, sellerId: req.user!.userId },
+      include: productInclude,
+    });
+    res.status(201).json({ success: true, data: product });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -214,8 +178,7 @@ router.post("/", authenticate, (req: Request, res: Response, next: NextFunction)
  *       - in: path
  *         name: id
  *         required: true
- *         schema:
- *           type: string
+ *         schema: { type: string }
  *     requestBody:
  *       required: true
  *       content:
@@ -227,26 +190,21 @@ router.post("/", authenticate, (req: Request, res: Response, next: NextFunction)
  *         description: Cập nhật thành công
  *       403:
  *         description: Không phải chủ sản phẩm
- *       404:
- *         description: Không tìm thấy
  */
-router.put("/:id", authenticate, (req: Request, res: Response, next: NextFunction) => {
+router.put("/:id", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const product = products.find((p) => p["id"] === req.params.id);
-    if (!product) {
-      res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" });
-      return;
+    const existing = await prisma.product.findUnique({ where: { id: req.params.id } });
+    if (!existing) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
+    if (existing.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
+      res.status(403).json({ success: false, message: "Không có quyền sửa sản phẩm này" }); return;
     }
-    if (product["sellerId"] !== req.user!.userId && req.user!.role !== "ADMIN") {
-      res.status(403).json({ success: false, message: "Không có quyền sửa sản phẩm này" });
-      return;
+    const parsed = createProductSchema.partial().safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors }); return;
     }
-
-    Object.assign(product, req.body, { updatedAt: new Date() });
+    const product = await prisma.product.update({ where: { id: req.params.id }, data: parsed.data, include: productInclude });
     res.json({ success: true, data: product });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 });
 
 /**
@@ -261,28 +219,21 @@ router.put("/:id", authenticate, (req: Request, res: Response, next: NextFunctio
  *       - in: path
  *         name: id
  *         required: true
- *         schema:
- *           type: string
+ *         schema: { type: string }
  *     responses:
  *       200:
  *         description: Xóa thành công
- *       403:
- *         description: Không có quyền
- *       404:
- *         description: Không tìm thấy
  */
-router.delete("/:id", authenticate, (req: Request, res: Response) => {
-  const idx = products.findIndex((p) => p["id"] === req.params.id);
-  if (idx === -1) {
-    res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" });
-    return;
-  }
-  if (products[idx]["sellerId"] !== req.user!.userId && req.user!.role !== "ADMIN") {
-    res.status(403).json({ success: false, message: "Không có quyền xóa sản phẩm này" });
-    return;
-  }
-  products.splice(idx, 1);
-  res.json({ success: true, message: "Sản phẩm đã được xóa" });
+router.delete("/:id", authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const existing = await prisma.product.findUnique({ where: { id: req.params.id } });
+    if (!existing) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
+    if (existing.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
+      res.status(403).json({ success: false, message: "Không có quyền xóa sản phẩm này" }); return;
+    }
+    await prisma.product.delete({ where: { id: req.params.id } });
+    res.json({ success: true, message: "Sản phẩm đã được xóa" });
+  } catch (err) { next(err); }
 });
 
 export default router;

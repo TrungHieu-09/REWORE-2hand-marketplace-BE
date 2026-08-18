@@ -1,11 +1,9 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { authenticate } from "../middleware/auth.middleware";
+import { prisma } from "../lib/prisma";
 
 const router = Router();
-const bids: Array<Record<string, unknown>> = [];
-const auctions: Array<Record<string, unknown>> = []; // shared ref – replace with Prisma
-const generateId = () => Math.random().toString(36).substring(2, 11);
 
 const placeBidSchema = z.object({
   auctionId: z.string().min(1),
@@ -29,82 +27,45 @@ const placeBidSchema = z.object({
  *     responses:
  *       201:
  *         description: Bid thành công
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 data:
- *                   $ref: '#/components/schemas/Bid'
  *       400:
- *         description: Bid không hợp lệ (thấp hơn current bid, auction đã kết thúc...)
- *       401:
- *         description: Chưa đăng nhập
+ *         description: Bid không hợp lệ
  */
-router.post("/", authenticate, (req: Request, res: Response, next: NextFunction) => {
+router.post("/", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const parsed = placeBidSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        message: "Validation error",
-        errors: parsed.error.flatten().fieldErrors,
-      });
-      return;
+      res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors }); return;
     }
 
     const { auctionId, amount } = parsed.data;
 
-    // TODO: replace with Prisma lookup
-    const auction = auctions.find((a) => a["id"] === auctionId);
-    if (!auction) {
-      res.status(404).json({ success: false, message: "Phiên đấu giá không tìm thấy" });
-      return;
-    }
-    if (auction["status"] !== "LIVE") {
-      res.status(400).json({ success: false, message: "Phiên đấu giá không đang diễn ra" });
-      return;
-    }
-    if (auction["sellerId"] === req.user!.userId) {
-      res.status(400).json({ success: false, message: "Không thể bid phiên đấu giá của chính mình" });
-      return;
-    }
+    const auction = await prisma.auction.findUnique({ where: { id: auctionId } });
+    if (!auction) { res.status(404).json({ success: false, message: "Phiên đấu giá không tìm thấy" }); return; }
+    if (auction.status !== "LIVE") { res.status(400).json({ success: false, message: "Phiên đấu giá không đang diễn ra" }); return; }
+    if (auction.sellerId === req.user!.userId) { res.status(400).json({ success: false, message: "Không thể bid phiên đấu giá của chính mình" }); return; }
+    if (new Date() > auction.endTime) { res.status(400).json({ success: false, message: "Phiên đấu giá đã hết thời gian" }); return; }
 
-    const currentBid = Number(auction["currentBid"]);
-    const minIncrement = Number(auction["minIncrement"] || 1000);
-
-    if (amount < currentBid + minIncrement) {
+    const minRequired = auction.currentBid + auction.minIncrement;
+    if (amount < minRequired) {
       res.status(400).json({
         success: false,
-        message: `Bid phải cao hơn giá hiện tại ít nhất ${minIncrement.toLocaleString("vi-VN")} đồng. Tối thiểu: ${(currentBid + minIncrement).toLocaleString("vi-VN")} đồng`,
-      });
-      return;
+        message: `Bid tối thiểu là ${minRequired.toLocaleString("vi-VN")} đồng (hiện tại ${auction.currentBid.toLocaleString("vi-VN")} + tăng tối thiểu ${auction.minIncrement.toLocaleString("vi-VN")})`,
+      }); return;
     }
 
-    // Mark previous winning bids as non-winning
-    bids.forEach((b) => {
-      if (b["auctionId"] === auctionId) b["isWinning"] = false;
-    });
+    // Transaction: tạo bid + cập nhật current bid + đánh dấu bid cũ không winning
+    const [bid] = await prisma.$transaction([
+      prisma.bid.create({
+        data: { auctionId, bidderId: req.user!.userId, amount, isWinning: true },
+        include: { bidder: { select: { id: true, name: true, avatar: true } } },
+      }),
+      prisma.bid.updateMany({ where: { auctionId, bidderId: { not: req.user!.userId }, isWinning: true }, data: { isWinning: false } }),
+      prisma.auction.update({ where: { id: auctionId }, data: { currentBid: amount } }),
+      prisma.user.update({ where: { id: req.user!.userId }, data: { totalBids: { increment: 1 } } }),
+    ]);
 
-    const newBid = {
-      id: generateId(),
-      auctionId,
-      bidderId: req.user!.userId,
-      amount,
-      isWinning: true,
-      createdAt: new Date(),
-    };
-    bids.push(newBid);
-
-    // Update current bid on auction
-    auction["currentBid"] = amount;
-
-    res.status(201).json({ success: true, data: newBid });
-  } catch (err) {
-    next(err);
-  }
+    res.status(201).json({ success: true, data: bid });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -117,51 +78,35 @@ router.post("/", authenticate, (req: Request, res: Response, next: NextFunction)
  *       - in: path
  *         name: auctionId
  *         required: true
- *         schema:
- *           type: string
+ *         schema: { type: string }
  *       - in: query
  *         name: page
- *         schema:
- *           type: integer
- *           default: 1
+ *         schema: { type: integer, default: 1 }
  *       - in: query
  *         name: limit
- *         schema:
- *           type: integer
- *           default: 20
+ *         schema: { type: integer, default: 20 }
  *     responses:
  *       200:
  *         description: Lịch sử bid
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 data:
- *                   type: array
- *                   items:
- *                     $ref: '#/components/schemas/Bid'
- *                 meta:
- *                   $ref: '#/components/schemas/PaginationMeta'
  */
-router.get("/auction/:auctionId", (req: Request, res: Response) => {
-  const page = parseInt(String(req.query.page || 1));
-  const limit = parseInt(String(req.query.limit || 20));
+router.get("/auction/:auctionId", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const page = Math.max(1, parseInt(String(req.query.page || 1)));
+    const limit = Math.min(50, parseInt(String(req.query.limit || 20)));
 
-  const auctionBids = bids
-    .filter((b) => b["auctionId"] === req.params.auctionId)
-    .sort((a, b) => new Date(b["createdAt"] as string).getTime() - new Date(a["createdAt"] as string).getTime());
+    const [data, total] = await Promise.all([
+      prisma.bid.findMany({
+        where: { auctionId: req.params.auctionId },
+        include: { bidder: { select: { id: true, name: true, avatar: true } } },
+        orderBy: { createdAt: "desc" },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.bid.count({ where: { auctionId: req.params.auctionId } }),
+    ]);
 
-  const start = (page - 1) * limit;
-  const data = auctionBids.slice(start, start + limit);
-
-  res.json({
-    success: true,
-    data,
-    meta: { total: auctionBids.length, page, limit, totalPages: Math.ceil(auctionBids.length / limit) },
-  });
+    res.json({ success: true, data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -175,34 +120,38 @@ router.get("/auction/:auctionId", (req: Request, res: Response) => {
  *     parameters:
  *       - in: query
  *         name: page
- *         schema:
- *           type: integer
- *           default: 1
+ *         schema: { type: integer, default: 1 }
  *       - in: query
  *         name: limit
- *         schema:
- *           type: integer
- *           default: 10
+ *         schema: { type: integer, default: 10 }
  *     responses:
  *       200:
  *         description: Lịch sử bid của tôi
  */
-router.get("/my-bids", authenticate, (req: Request, res: Response) => {
-  const page = parseInt(String(req.query.page || 1));
-  const limit = parseInt(String(req.query.limit || 10));
+router.get("/my-bids", authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const page = Math.max(1, parseInt(String(req.query.page || 1)));
+    const limit = Math.min(50, parseInt(String(req.query.limit || 10)));
 
-  const myBids = bids
-    .filter((b) => b["bidderId"] === req.user!.userId)
-    .sort((a, b) => new Date(b["createdAt"] as string).getTime() - new Date(a["createdAt"] as string).getTime());
+    const [data, total] = await Promise.all([
+      prisma.bid.findMany({
+        where: { bidderId: req.user!.userId },
+        include: {
+          auction: {
+            include: {
+              product: { select: { id: true, title: true, images: true, category: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.bid.count({ where: { bidderId: req.user!.userId } }),
+    ]);
 
-  const start = (page - 1) * limit;
-  const data = myBids.slice(start, start + limit);
-
-  res.json({
-    success: true,
-    data,
-    meta: { total: myBids.length, page, limit, totalPages: Math.ceil(myBids.length / limit) },
-  });
+    res.json({ success: true, data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } });
+  } catch (err) { next(err); }
 });
 
 export default router;

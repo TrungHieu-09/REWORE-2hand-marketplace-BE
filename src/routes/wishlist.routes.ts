@@ -1,64 +1,60 @@
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { authenticate } from "../middleware/auth.middleware";
+import { prisma } from "../lib/prisma";
 
 const router = Router();
-const wishlistItems: Array<Record<string, unknown>> = [];
-const generateId = () => Math.random().toString(36).substring(2, 11);
 
 const addWishlistSchema = z.object({
   productId: z.string().min(1, "productId là bắt buộc"),
 });
+
+const wishlistInclude = {
+  product: {
+    include: {
+      seller: { select: { id: true, name: true, avatar: true, reputation: true } },
+      _count: { select: { wishlistItems: true } },
+    },
+  },
+};
 
 /**
  * @openapi
  * /api/wishlist:
  *   get:
  *     tags: [Wishlist]
- *     summary: Lấy danh sách sản phẩm yêu thích của user
+ *     summary: Lấy danh sách sản phẩm yêu thích
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: query
  *         name: page
- *         schema:
- *           type: integer
- *           default: 1
+ *         schema: { type: integer, default: 1 }
  *       - in: query
  *         name: limit
- *         schema:
- *           type: integer
- *           default: 12
+ *         schema: { type: integer, default: 12 }
  *     responses:
  *       200:
  *         description: Danh sách wishlist
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 data:
- *                   type: array
- *                   items:
- *                     $ref: '#/components/schemas/WishlistItem'
- *                 meta:
- *                   $ref: '#/components/schemas/PaginationMeta'
  */
-router.get("/", authenticate, (req: Request, res: Response) => {
-  const page = parseInt(String(req.query.page || 1));
-  const limit = parseInt(String(req.query.limit || 12));
+router.get("/", authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const page = Math.max(1, parseInt(String(req.query.page || 1)));
+    const limit = Math.min(50, parseInt(String(req.query.limit || 12)));
 
-  const myItems = wishlistItems.filter((w) => w["userId"] === req.user!.userId);
-  const start = (page - 1) * limit;
-  const data = myItems.slice(start, start + limit);
+    const [data, total] = await Promise.all([
+      prisma.wishlistItem.findMany({
+        where: { userId: req.user!.userId },
+        include: wishlistInclude,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.wishlistItem.count({ where: { userId: req.user!.userId } }),
+    ]);
 
-  res.json({
-    success: true,
-    data,
-    meta: { total: myItems.length, page, limit, totalPages: Math.ceil(myItems.length / limit) },
-  });
+    res.json({ success: true, data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -82,43 +78,33 @@ router.get("/", authenticate, (req: Request, res: Response) => {
  *     responses:
  *       201:
  *         description: Thêm thành công
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 data:
- *                   $ref: '#/components/schemas/WishlistItem'
  *       409:
  *         description: Sản phẩm đã có trong wishlist
  */
-router.post("/", authenticate, (req: Request, res: Response) => {
-  const parsed = addWishlistSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({
-      success: false,
-      message: "Validation error",
-      errors: parsed.error.flatten().fieldErrors,
-    });
-    return;
-  }
+router.post("/", authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const parsed = addWishlistSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors }); return;
+    }
 
-  const { productId } = parsed.data;
-  const userId = req.user!.userId;
+    const { productId } = parsed.data;
 
-  // Check duplicate
-  const existing = wishlistItems.find((w) => w["userId"] === userId && w["productId"] === productId);
-  if (existing) {
-    res.status(409).json({ success: false, message: "Sản phẩm đã có trong danh sách yêu thích" });
-    return;
-  }
+    // Check product exists
+    const product = await prisma.product.findUnique({ where: { id: productId } });
+    if (!product) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
 
-  const newItem = { id: generateId(), userId, productId, createdAt: new Date() };
-  wishlistItems.push(newItem);
-
-  res.status(201).json({ success: true, data: newItem });
+    try {
+      const item = await prisma.wishlistItem.create({
+        data: { userId: req.user!.userId, productId },
+        include: wishlistInclude,
+      });
+      res.status(201).json({ success: true, data: item });
+    } catch {
+      // Unique constraint violation — already in wishlist
+      res.status(409).json({ success: false, message: "Sản phẩm đã có trong danh sách yêu thích" });
+    }
+  } catch (err) { next(err); }
 });
 
 /**
@@ -133,27 +119,25 @@ router.post("/", authenticate, (req: Request, res: Response) => {
  *       - in: path
  *         name: productId
  *         required: true
- *         schema:
- *           type: string
+ *         schema: { type: string }
  *     responses:
  *       200:
  *         description: Xóa thành công
  *       404:
- *         description: Sản phẩm không có trong wishlist
+ *         description: Không có trong wishlist
  */
-router.delete("/:productId", authenticate, (req: Request, res: Response) => {
-  const userId = req.user!.userId;
-  const idx = wishlistItems.findIndex(
-    (w) => w["userId"] === userId && w["productId"] === req.params.productId
-  );
+router.delete("/:productId", authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const item = await prisma.wishlistItem.findUnique({
+      where: { userId_productId: { userId: req.user!.userId, productId: req.params.productId } },
+    });
+    if (!item) { res.status(404).json({ success: false, message: "Sản phẩm không có trong danh sách yêu thích" }); return; }
 
-  if (idx === -1) {
-    res.status(404).json({ success: false, message: "Sản phẩm không có trong danh sách yêu thích" });
-    return;
-  }
-
-  wishlistItems.splice(idx, 1);
-  res.json({ success: true, message: "Đã xóa khỏi danh sách yêu thích" });
+    await prisma.wishlistItem.delete({
+      where: { userId_productId: { userId: req.user!.userId, productId: req.params.productId } },
+    });
+    res.json({ success: true, message: "Đã xóa khỏi danh sách yêu thích" });
+  } catch (err) { next(err); }
 });
 
 /**
@@ -168,8 +152,7 @@ router.delete("/:productId", authenticate, (req: Request, res: Response) => {
  *       - in: path
  *         name: productId
  *         required: true
- *         schema:
- *           type: string
+ *         schema: { type: string }
  *     responses:
  *       200:
  *         description: Kết quả kiểm tra
@@ -178,17 +161,16 @@ router.delete("/:productId", authenticate, (req: Request, res: Response) => {
  *             schema:
  *               type: object
  *               properties:
- *                 success:
- *                   type: boolean
- *                 isInWishlist:
- *                   type: boolean
+ *                 success: { type: boolean }
+ *                 isInWishlist: { type: boolean }
  */
-router.get("/check/:productId", authenticate, (req: Request, res: Response) => {
-  const userId = req.user!.userId;
-  const isInWishlist = wishlistItems.some(
-    (w) => w["userId"] === userId && w["productId"] === req.params.productId
-  );
-  res.json({ success: true, isInWishlist });
+router.get("/check/:productId", authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const item = await prisma.wishlistItem.findUnique({
+      where: { userId_productId: { userId: req.user!.userId, productId: req.params.productId } },
+    });
+    res.json({ success: true, isInWishlist: !!item });
+  } catch (err) { next(err); }
 });
 
 export default router;
