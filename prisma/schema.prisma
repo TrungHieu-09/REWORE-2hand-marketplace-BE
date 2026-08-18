@@ -1,8 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client"
   output   = "../generated/prisma"
@@ -10,4 +8,197 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum Role {
+  BUYER
+  SELLER
+  ADMIN
+}
+
+enum ProductStatus {
+  ACTIVE
+  SOLD
+  AUCTION
+  INACTIVE
+}
+
+enum ProductCondition {
+  NEW
+  LIKE_NEW
+  GOOD
+  FAIR
+  POOR
+}
+
+enum AuctionStatus {
+  UPCOMING
+  LIVE
+  ENDED
+  CANCELLED
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+// ─── Models ──────────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  password     String
+  name         String
+  avatar       String?
+  bio          String?
+  phone        String?
+  address      String?
+  role         Role     @default(BUYER)
+  reputation   Float    @default(0)
+  totalSales   Int      @default(0)
+  totalBids    Int      @default(0)
+  isVerified   Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  products     Product[]
+  auctions     Auction[]
+  bids         Bid[]
+  ordersAsBuyer  Order[]  @relation("BuyerOrders")
+  ordersAsSeller Order[]  @relation("SellerOrders")
+  wishlistItems  WishlistItem[]
+  reviews      Review[]  @relation("ReviewsGiven")
+  reviewsReceived Review[] @relation("ReviewsReceived")
+
+  @@map("users")
+}
+
+model Product {
+  id          String           @id @default(cuid())
+  title       String
+  description String
+  price       Float
+  images      String[]
+  category    String
+  condition   ProductCondition @default(GOOD)
+  status      ProductStatus    @default(ACTIVE)
+  brand       String?
+  size        String?
+  color       String?
+  tags        String[]
+  viewCount   Int              @default(0)
+  sellerId    String
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  // Relations
+  seller       User           @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  auction      Auction?
+  orderItems   Order[]
+  wishlistItems WishlistItem[]
+
+  @@map("products")
+}
+
+model Auction {
+  id           String        @id @default(cuid())
+  productId    String        @unique
+  sellerId     String
+  startPrice   Float
+  currentBid   Float
+  minIncrement Float         @default(1000)
+  startTime    DateTime
+  endTime      DateTime
+  status       AuctionStatus @default(UPCOMING)
+  winnerId     String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  // Relations
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  seller    User     @relation(fields: [sellerId], references: [id])
+  bids      Bid[]
+  order     Order?
+
+  @@map("auctions")
+}
+
+model Bid {
+  id        String   @id @default(cuid())
+  auctionId String
+  bidderId  String
+  amount    Float
+  isWinning Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  // Relations
+  auction   Auction  @relation(fields: [auctionId], references: [id], onDelete: Cascade)
+  bidder    User     @relation(fields: [bidderId], references: [id], onDelete: Cascade)
+
+  @@map("bids")
+}
+
+model Order {
+  id          String      @id @default(cuid())
+  buyerId     String
+  sellerId    String
+  productId   String?
+  auctionId   String?     @unique
+  totalPrice  Float
+  shippingFee Float       @default(0)
+  status      OrderStatus @default(PENDING)
+  shippingAddress String?
+  note        String?
+  paidAt      DateTime?
+  shippedAt   DateTime?
+  deliveredAt DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  // Relations
+  buyer    User     @relation("BuyerOrders", fields: [buyerId], references: [id])
+  seller   User     @relation("SellerOrders", fields: [sellerId], references: [id])
+  product  Product? @relation(fields: [productId], references: [id])
+  auction  Auction? @relation(fields: [auctionId], references: [id])
+
+  @@map("orders")
+}
+
+model WishlistItem {
+  id        String   @id @default(cuid())
+  userId    String
+  productId String
+  createdAt DateTime @default(now())
+
+  // Relations
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@map("wishlist_items")
+}
+
+model Review {
+  id         String   @id @default(cuid())
+  reviewerId String
+  revieweeId String
+  orderId    String?
+  rating     Int      // 1-5
+  comment    String?
+  createdAt  DateTime @default(now())
+
+  // Relations
+  reviewer User @relation("ReviewsGiven", fields: [reviewerId], references: [id], onDelete: Cascade)
+  reviewee User @relation("ReviewsReceived", fields: [revieweeId], references: [id], onDelete: Cascade)
+
+  @@map("reviews")
 }
