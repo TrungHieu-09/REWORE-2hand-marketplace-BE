@@ -14,8 +14,9 @@ Nền tảng mua bán đồ cũ kết hợp đấu giá trực tuyến.
 ### Authentication
 Hầu hết các endpoint yêu cầu **Bearer JWT Token**.
 1. Đăng ký tài khoản qua \`POST /api/auth/register\`
-2. Đăng nhập qua \`POST /api/auth/login\` để nhận token
-3. Click **Authorize** và nhập \`Bearer <token>\`
+2. Xác thực OTP qua \`POST /api/auth/verify-otp\` để nhận token
+3. Đăng nhập qua \`POST /api/auth/login\` cho các lần sau
+4. Click **Authorize** và nhập \`Bearer <token>\`
       `,
       contact: {
         name: "REWORE Dev Team",
@@ -83,6 +84,7 @@ Hầu hết các endpoint yêu cầu **Bearer JWT Token**.
             totalBids: { type: "integer", example: 56 },
             isVerified: { type: "boolean" },
             createdAt: { type: "string", format: "date-time" },
+            updatedAt: { type: "string", format: "date-time" },
           },
         },
         RegisterBody: {
@@ -92,6 +94,30 @@ Hầu hết các endpoint yêu cầu **Bearer JWT Token**.
             email: { type: "string", format: "email", example: "user@example.com" },
             password: { type: "string", minLength: 6, example: "Password123" },
             name: { type: "string", example: "Nguyễn Văn A" },
+          },
+        },
+        VerifyOtpBody: {
+          type: "object",
+          required: ["email", "otp"],
+          properties: {
+            email: { type: "string", format: "email", example: "user@example.com" },
+            otp: { type: "string", minLength: 6, maxLength: 6, example: "123456" },
+          },
+        },
+        ResendOtpBody: {
+          type: "object",
+          required: ["email"],
+          properties: {
+            email: { type: "string", format: "email", example: "user@example.com" },
+          },
+        },
+        OtpRequiredResponse: {
+          type: "object",
+          properties: {
+            success: { type: "boolean", example: true },
+            message: { type: "string", example: "OTP sent to email" },
+            email: { type: "string", format: "email", example: "user@example.com" },
+            requiresOtp: { type: "boolean", example: true },
           },
         },
         LoginBody: {

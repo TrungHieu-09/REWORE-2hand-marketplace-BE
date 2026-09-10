@@ -80,7 +80,8 @@ router.get("/", authenticate, async (req: Request, res: Response, next: NextFunc
  */
 router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const user = await prisma.user.findUnique({ where: { id: req.params.id }, select: userSelect });
+    const userId = String(req.params.id);
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: userSelect });
     if (!user) { res.status(404).json({ success: false, message: "User không tìm thấy" }); return; }
     res.json({ success: true, data: user });
   } catch (err) { next(err); }
@@ -119,14 +120,15 @@ router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
  */
 router.put("/:id", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    if (req.user!.userId !== req.params.id && req.user!.role !== "ADMIN") {
+    const userId = String(req.params.id);
+    if (req.user!.userId !== userId && req.user!.role !== "ADMIN") {
       res.status(403).json({ success: false, message: "Không có quyền cập nhật profile này" }); return;
     }
     const parsed = updateUserSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors }); return;
     }
-    const user = await prisma.user.update({ where: { id: req.params.id }, data: parsed.data, select: userSelect });
+    const user = await prisma.user.update({ where: { id: userId }, data: parsed.data, select: userSelect });
     res.json({ success: true, data: user });
   } catch (err) { next(err); }
 });
@@ -152,11 +154,12 @@ router.put("/:id", authenticate, async (req: Request, res: Response, next: NextF
  */
 router.delete("/:id", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const userId = String(req.params.id);
     if (req.user!.role !== "ADMIN") {
       res.status(403).json({ success: false, message: "Chỉ Admin mới có quyền xóa user" }); return;
     }
-    await prisma.user.delete({ where: { id: req.params.id } });
-    res.json({ success: true, message: `User ${req.params.id} đã được xóa` });
+    await prisma.user.delete({ where: { id: userId } });
+    res.json({ success: true, message: `User ${userId} đã được xóa` });
   } catch (err) { next(err); }
 });
 

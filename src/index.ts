@@ -12,6 +12,7 @@ import auctionsRoutes from "./routes/auctions.routes";
 import bidsRoutes from "./routes/bids.routes";
 import ordersRoutes from "./routes/orders.routes";
 import wishlistRoutes from "./routes/wishlist.routes";
+import { startPendingRegistrationCleanupJob } from "./lib/pending-registration-cleanup";
 
 // Middleware
 import { errorHandler } from "./middleware/error.middleware";
@@ -28,6 +29,13 @@ app.use(
 );
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+if (process.env.NODE_ENV !== "production") {
+  app.use("/api/auth", (req, _res, next) => {
+    console.log(`[AUTH REQUEST] ${req.method} ${req.originalUrl}`);
+    next();
+  });
+}
 
 // ─── Swagger UI ────────────────────────────────────────────────────────────────
 app.use(
@@ -85,6 +93,8 @@ app.use((_req, res) => {
 app.use(errorHandler);
 
 // ─── Start Server ─────────────────────────────────────────────────────────────
+startPendingRegistrationCleanupJob();
+
 app.listen(PORT, () => {
   console.log(`\n🚀 REWORE Server running on http://localhost:${PORT}`);
   console.log(`📚 Swagger UI available at http://localhost:${PORT}/api-docs\n`);

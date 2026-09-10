@@ -91,18 +91,19 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
  */
 router.get("/auction/:auctionId", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const auctionId = String(req.params.auctionId);
     const page = Math.max(1, parseInt(String(req.query.page || 1)));
     const limit = Math.min(50, parseInt(String(req.query.limit || 20)));
 
     const [data, total] = await Promise.all([
       prisma.bid.findMany({
-        where: { auctionId: req.params.auctionId },
+        where: { auctionId },
         include: { bidder: { select: { id: true, name: true, avatar: true } } },
         orderBy: { createdAt: "desc" },
         skip: (page - 1) * limit,
         take: limit,
       }),
-      prisma.bid.count({ where: { auctionId: req.params.auctionId } }),
+      prisma.bid.count({ where: { auctionId } }),
     ]);
 
     res.json({ success: true, data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } });

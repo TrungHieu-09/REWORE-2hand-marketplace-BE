@@ -128,13 +128,14 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
  */
 router.delete("/:productId", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const productId = String(req.params.productId);
     const item = await prisma.wishlistItem.findUnique({
-      where: { userId_productId: { userId: req.user!.userId, productId: req.params.productId } },
+      where: { userId_productId: { userId: req.user!.userId, productId } },
     });
     if (!item) { res.status(404).json({ success: false, message: "Sản phẩm không có trong danh sách yêu thích" }); return; }
 
     await prisma.wishlistItem.delete({
-      where: { userId_productId: { userId: req.user!.userId, productId: req.params.productId } },
+      where: { userId_productId: { userId: req.user!.userId, productId } },
     });
     res.json({ success: true, message: "Đã xóa khỏi danh sách yêu thích" });
   } catch (err) { next(err); }
@@ -166,8 +167,9 @@ router.delete("/:productId", authenticate, async (req: Request, res: Response, n
  */
 router.get("/check/:productId", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const productId = String(req.params.productId);
     const item = await prisma.wishlistItem.findUnique({
-      where: { userId_productId: { userId: req.user!.userId, productId: req.params.productId } },
+      where: { userId_productId: { userId: req.user!.userId, productId } },
     });
     res.json({ success: true, isInWishlist: !!item });
   } catch (err) { next(err); }

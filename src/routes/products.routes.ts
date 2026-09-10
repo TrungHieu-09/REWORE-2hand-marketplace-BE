@@ -2,7 +2,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { authenticate } from "../middleware/auth.middleware";
 import { prisma } from "../lib/prisma";
-import { Prisma } from "@prisma/client";
+import { Prisma } from ".prisma/client";
 
 const router = Router();
 
@@ -119,14 +119,15 @@ router.get("/", async (req: Request, res: Response, next: NextFunction) => {
  */
 router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const productId = String(req.params.id);
     const product = await prisma.product.findUnique({
-      where: { id: req.params.id },
+      where: { id: productId },
       include: { ...productInclude, auction: true },
     });
     if (!product) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
 
     // Tăng view count
-    await prisma.product.update({ where: { id: req.params.id }, data: { viewCount: { increment: 1 } } });
+    await prisma.product.update({ where: { id: productId }, data: { viewCount: { increment: 1 } } });
 
     res.json({ success: true, data: product });
   } catch (err) { next(err); }
@@ -193,7 +194,8 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
  */
 router.put("/:id", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const existing = await prisma.product.findUnique({ where: { id: req.params.id } });
+    const productId = String(req.params.id);
+    const existing = await prisma.product.findUnique({ where: { id: productId } });
     if (!existing) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
     if (existing.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
       res.status(403).json({ success: false, message: "Không có quyền sửa sản phẩm này" }); return;
@@ -202,7 +204,7 @@ router.put("/:id", authenticate, async (req: Request, res: Response, next: NextF
     if (!parsed.success) {
       res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors }); return;
     }
-    const product = await prisma.product.update({ where: { id: req.params.id }, data: parsed.data, include: productInclude });
+    const product = await prisma.product.update({ where: { id: productId }, data: parsed.data, include: productInclude });
     res.json({ success: true, data: product });
   } catch (err) { next(err); }
 });
@@ -226,12 +228,13 @@ router.put("/:id", authenticate, async (req: Request, res: Response, next: NextF
  */
 router.delete("/:id", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const existing = await prisma.product.findUnique({ where: { id: req.params.id } });
+    const productId = String(req.params.id);
+    const existing = await prisma.product.findUnique({ where: { id: productId } });
     if (!existing) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
     if (existing.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
       res.status(403).json({ success: false, message: "Không có quyền xóa sản phẩm này" }); return;
     }
-    await prisma.product.delete({ where: { id: req.params.id } });
+    await prisma.product.delete({ where: { id: productId } });
     res.json({ success: true, message: "Sản phẩm đã được xóa" });
   } catch (err) { next(err); }
 });

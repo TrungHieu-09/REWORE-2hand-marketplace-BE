@@ -85,7 +85,8 @@ router.get("/", authenticate, async (req: Request, res: Response, next: NextFunc
  */
 router.get("/:id", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const order = await prisma.order.findUnique({ where: { id: req.params.id }, include: orderInclude });
+    const orderId = String(req.params.id);
+    const order = await prisma.order.findUnique({ where: { id: orderId }, include: orderInclude });
     if (!order) { res.status(404).json({ success: false, message: "Đơn hàng không tìm thấy" }); return; }
     if (order.buyerId !== req.user!.userId && order.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
       res.status(403).json({ success: false, message: "Không có quyền xem đơn hàng này" }); return;
@@ -124,7 +125,8 @@ router.get("/:id", authenticate, async (req: Request, res: Response, next: NextF
  */
 router.patch("/:id/status", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    const orderId = String(req.params.id);
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
     if (!order) { res.status(404).json({ success: false, message: "Đơn hàng không tìm thấy" }); return; }
 
     const isBuyer = order.buyerId === req.user!.userId;
@@ -149,7 +151,7 @@ router.patch("/:id/status", authenticate, async (req: Request, res: Response, ne
     };
 
     const updated = await prisma.order.update({
-      where: { id: req.params.id },
+      where: { id: orderId },
       data: { status, ...timeFields },
       include: orderInclude,
     });

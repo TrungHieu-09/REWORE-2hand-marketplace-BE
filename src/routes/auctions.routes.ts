@@ -81,8 +81,9 @@ router.get("/", async (req: Request, res: Response, next: NextFunction) => {
  */
 router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const auctionId = String(req.params.id);
     const auction = await prisma.auction.findUnique({
-      where: { id: req.params.id },
+      where: { id: auctionId },
       include: { ...auctionInclude, bids: { include: { bidder: { select: { id: true, name: true, avatar: true } } }, orderBy: { createdAt: "desc" }, take: 10 } },
     });
     if (!auction) { res.status(404).json({ success: false, message: "Phiên đấu giá không tìm thấy" }); return; }
@@ -162,7 +163,8 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
  */
 router.patch("/:id/cancel", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const auction = await prisma.auction.findUnique({ where: { id: req.params.id } });
+    const auctionId = String(req.params.id);
+    const auction = await prisma.auction.findUnique({ where: { id: auctionId } });
     if (!auction) { res.status(404).json({ success: false, message: "Phiên đấu giá không tìm thấy" }); return; }
     if (auction.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
       res.status(403).json({ success: false, message: "Không có quyền hủy phiên đấu giá này" }); return;
@@ -170,7 +172,7 @@ router.patch("/:id/cancel", authenticate, async (req: Request, res: Response, ne
     if (auction.status === "ENDED" || auction.status === "CANCELLED") {
       res.status(400).json({ success: false, message: "Phiên đấu giá đã kết thúc hoặc đã bị hủy" }); return;
     }
-    const updated = await prisma.auction.update({ where: { id: req.params.id }, data: { status: "CANCELLED" } });
+    const updated = await prisma.auction.update({ where: { id: auctionId }, data: { status: "CANCELLED" } });
     // Revert product status
     await prisma.product.update({ where: { id: auction.productId }, data: { status: "ACTIVE" } });
     res.json({ success: true, message: "Phiên đấu giá đã bị hủy", data: updated });
