@@ -12,6 +12,7 @@ import auctionsRoutes from "./routes/auctions.routes";
 import bidsRoutes from "./routes/bids.routes";
 import ordersRoutes from "./routes/orders.routes";
 import wishlistRoutes from "./routes/wishlist.routes";
+import adminRoutes from "./routes/admin.routes";
 import { startPendingRegistrationCleanupJob } from "./lib/pending-registration-cleanup";
 
 // Middleware
@@ -83,6 +84,8 @@ app.use("/api/auctions", auctionsRoutes);
 app.use("/api/bids", bidsRoutes);
 app.use("/api/orders", ordersRoutes);
 app.use("/api/wishlist", wishlistRoutes);
+app.use("/admin", adminRoutes);
+app.use("/api/admin", adminRoutes);
 
 // ─── 404 Handler ──────────────────────────────────────────────────────────────
 app.use((_req, res) => {

@@ -149,10 +149,14 @@ router.patch("/:id/status", authenticate, async (req: Request, res: Response, ne
       ...(status === "SHIPPED" && { shippedAt: now }),
       ...(status === "DELIVERED" && { deliveredAt: now }),
     };
+    const paymentFields = {
+      ...(status === "PAID" && { paymentStatus: "PAID" as const }),
+      ...(status === "REFUNDED" && { paymentStatus: "REFUNDED" as const }),
+    };
 
     const updated = await prisma.order.update({
       where: { id: orderId },
-      data: { status, ...timeFields },
+      data: { status, ...timeFields, ...paymentFields },
       include: orderInclude,
     });
 

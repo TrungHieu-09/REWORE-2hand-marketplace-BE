@@ -24,6 +24,8 @@ enum ProductStatus {
   SOLD
   AUCTION
   INACTIVE
+  HIDDEN
+  REMOVED
 }
 
 enum ProductCondition {
@@ -43,44 +45,130 @@ enum AuctionStatus {
 
 enum OrderStatus {
   PENDING
+  CONFIRMED
   PAID
   SHIPPED
   DELIVERED
+  COMPLETED
   CANCELLED
   REFUNDED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  REFUNDED
+}
+
+enum SellerProfileStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum ReportTargetType {
+  USER
+  PRODUCT
+  ORDER
+}
+
+enum ReportStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
+enum ReportResolutionAction {
+  WARN
+  SUSPEND
+  DISMISS
 }
 
 // ─── Models ──────────────────────────────────────────────────────────────────
 
 model User {
-  id         String   @id @default(cuid())
-  email      String   @unique
-  password   String
-  name       String
-  avatar     String?
-  bio        String?
-  phone      String?
-  address    String?
-  role       Role     @default(BUYER)
-  reputation Float    @default(0)
-  totalSales Int      @default(0)
-  totalBids  Int      @default(0)
-  isVerified Boolean  @default(false)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id           String    @id @default(cuid())
+  email        String    @unique
+  password     String
+  name         String
+  avatar       String?
+  bio          String?
+  phone        String?
+  address      String?
+  role         Role      @default(BUYER)
+  isBanned     Boolean   @default(false)
+  bannedReason String?
+  bannedAt     DateTime?
+  reputation   Float     @default(0)
+  totalSales   Int       @default(0)
+  totalBids    Int       @default(0)
+  isVerified   Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   // Relations
-  products        Product[]
-  auctions        Auction[]
-  bids            Bid[]
-  ordersAsBuyer   Order[]        @relation("BuyerOrders")
-  ordersAsSeller  Order[]        @relation("SellerOrders")
-  wishlistItems   WishlistItem[]
-  reviews         Review[]       @relation("ReviewsGiven")
-  reviewsReceived Review[]       @relation("ReviewsReceived")
-  emailOtps       EmailOtp[]
+  products               Product[]
+  auctions               Auction[]
+  bids                   Bid[]
+  ordersAsBuyer          Order[]               @relation("BuyerOrders")
+  ordersAsSeller         Order[]               @relation("SellerOrders")
+  wishlistItems          WishlistItem[]
+  reviews                Review[]              @relation("ReviewsGiven")
+  reviewsReceived        Review[]              @relation("ReviewsReceived")
+  emailOtps              EmailOtp[]
+  sellerProfile          SellerProfile?        @relation("SellerProfileOwner")
+  reviewedSellerProfiles SellerProfile[]       @relation("SellerProfileReviewer")
+  sellerStatusActions    SellerStatusHistory[] @relation("SellerStatusHistoryActor")
+  reportsMade            Report[]              @relation("ReportsMade")
+  reportsResolved        Report[]              @relation("ReportsResolved")
+  adminActionLogs        AdminActionLog[]      @relation("AdminActionLogs")
 
   @@map("users")
+}
+
+model SellerProfile {
+  id                String              @id @default(cuid())
+  userId            String              @unique
+  shopName          String
+  idCardFrontUrl    String
+  idCardBackUrl     String
+  selfieUrl         String?
+  bankAccountName   String
+  bankAccountNumber String
+  bankName          String
+  pickupAddress     String
+  status            SellerProfileStatus @default(PENDING)
+  rejectedReason    String?
+  reviewedBy        String?
+  reviewedAt        DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  user            User                  @relation("SellerProfileOwner", fields: [userId], references: [id], onDelete: Cascade)
+  reviewedByAdmin User?                 @relation("SellerProfileReviewer", fields: [reviewedBy], references: [id])
+  statusHistory   SellerStatusHistory[]
+
+  @@index([status])
+  @@index([reviewedBy])
+  @@map("seller_profiles")
+}
+
+model SellerStatusHistory {
+  id              String               @id @default(cuid())
+  sellerProfileId String
+  fromStatus      SellerProfileStatus?
+  toStatus        SellerProfileStatus
+  actorId         String
+  reason          String?
+  createdAt       DateTime             @default(now())
+
+  sellerProfile SellerProfile @relation(fields: [sellerProfileId], references: [id], onDelete: Cascade)
+  actor         User          @relation("SellerStatusHistoryActor", fields: [actorId], references: [id])
+
+  @@index([sellerProfileId])
+  @@index([actorId])
+  @@map("seller_status_history")
 }
 
 model Product {
@@ -149,21 +237,23 @@ model Bid {
 }
 
 model Order {
-  id              String      @id @default(cuid())
+  id              String        @id @default(cuid())
   buyerId         String
   sellerId        String
   productId       String?
-  auctionId       String?     @unique
+  auctionId       String?       @unique
   totalPrice      Float
-  shippingFee     Float       @default(0)
-  status          OrderStatus @default(PENDING)
+  shippingFee     Float         @default(0)
+  paymentStatus   PaymentStatus @default(UNPAID)
+  status          OrderStatus   @default(PENDING)
+  qrCodeRef       String?
   shippingAddress String?
   note            String?
   paidAt          DateTime?
   shippedAt       DateTime?
   deliveredAt     DateTime?
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
 
   // Relations
   buyer   User     @relation("BuyerOrders", fields: [buyerId], references: [id])
@@ -172,6 +262,46 @@ model Order {
   auction Auction? @relation(fields: [auctionId], references: [id])
 
   @@map("orders")
+}
+
+model Report {
+  id               String                  @id @default(cuid())
+  reporterId       String
+  targetType       ReportTargetType
+  targetId         String
+  reason           String
+  status           ReportStatus            @default(OPEN)
+  resolutionAction ReportResolutionAction?
+  resolutionNote   String?
+  resolvedBy       String?
+  resolvedAt       DateTime?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+
+  reporter        User  @relation("ReportsMade", fields: [reporterId], references: [id], onDelete: Cascade)
+  resolvedByAdmin User? @relation("ReportsResolved", fields: [resolvedBy], references: [id])
+
+  @@index([reporterId])
+  @@index([targetType, targetId])
+  @@index([status])
+  @@map("reports")
+}
+
+model AdminActionLog {
+  id         String   @id @default(cuid())
+  adminId    String
+  actionType String
+  targetType String
+  targetId   String
+  note       String?
+  createdAt  DateTime @default(now())
+
+  admin User @relation("AdminActionLogs", fields: [adminId], references: [id])
+
+  @@index([adminId])
+  @@index([targetType, targetId])
+  @@index([actionType])
+  @@map("admin_action_logs")
 }
 
 model WishlistItem {

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { authenticate } from "../middleware/auth.middleware";
 import { prisma } from "../lib/prisma";
 import { Prisma } from ".prisma/client";
+import { canSell, getSellingUser, sellerBlockedResponse } from "../lib/seller-permissions";
 
 const router = Router();
 
@@ -155,6 +156,12 @@ router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
  */
 router.post("/", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const seller = await getSellingUser(req.user!.userId);
+    if (!canSell(seller)) {
+      res.status(403).json(sellerBlockedResponse(seller?.sellerProfile?.status));
+      return;
+    }
+
     const parsed = createProductSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors }); return;
@@ -195,9 +202,15 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
 router.put("/:id", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const productId = String(req.params.id);
+    const seller = await getSellingUser(req.user!.userId);
+    if (!seller) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
     const existing = await prisma.product.findUnique({ where: { id: productId } });
     if (!existing) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
-    if (existing.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
+    if (seller.role !== "ADMIN" && (existing.sellerId !== req.user!.userId || !canSell(seller))) {
       res.status(403).json({ success: false, message: "Không có quyền sửa sản phẩm này" }); return;
     }
     const parsed = createProductSchema.partial().safeParse(req.body);
@@ -229,9 +242,15 @@ router.put("/:id", authenticate, async (req: Request, res: Response, next: NextF
 router.delete("/:id", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const productId = String(req.params.id);
+    const seller = await getSellingUser(req.user!.userId);
+    if (!seller) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
     const existing = await prisma.product.findUnique({ where: { id: productId } });
     if (!existing) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
-    if (existing.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
+    if (seller.role !== "ADMIN" && (existing.sellerId !== req.user!.userId || !canSell(seller))) {
       res.status(403).json({ success: false, message: "Không có quyền xóa sản phẩm này" }); return;
     }
     await prisma.product.delete({ where: { id: productId } });

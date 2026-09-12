@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { authenticate } from "../middleware/auth.middleware";
 import { prisma } from "../lib/prisma";
+import { canSell, getSellingUser, sellerBlockedResponse } from "../lib/seller-permissions";
 
 const router = Router();
 
@@ -113,6 +114,12 @@ router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
  */
 router.post("/", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const seller = await getSellingUser(req.user!.userId);
+    if (!canSell(seller)) {
+      res.status(403).json(sellerBlockedResponse(seller?.sellerProfile?.status));
+      return;
+    }
+
     const parsed = createAuctionSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors }); return;
@@ -126,7 +133,7 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
     // Verify product belongs to this seller
     const product = await prisma.product.findUnique({ where: { id: productId } });
     if (!product) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
-    if (product.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
+    if (product.sellerId !== req.user!.userId && seller?.role !== "ADMIN") {
       res.status(403).json({ success: false, message: "Sản phẩm không thuộc về bạn" }); return;
     }
 
@@ -164,9 +171,15 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
 router.patch("/:id/cancel", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const auctionId = String(req.params.id);
+    const seller = await getSellingUser(req.user!.userId);
+    if (!seller) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
     const auction = await prisma.auction.findUnique({ where: { id: auctionId } });
     if (!auction) { res.status(404).json({ success: false, message: "Phiên đấu giá không tìm thấy" }); return; }
-    if (auction.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
+    if (seller.role !== "ADMIN" && (auction.sellerId !== req.user!.userId || !canSell(seller))) {
       res.status(403).json({ success: false, message: "Không có quyền hủy phiên đấu giá này" }); return;
     }
     if (auction.status === "ENDED" || auction.status === "CANCELLED") {

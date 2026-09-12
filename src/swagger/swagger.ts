@@ -281,6 +281,7 @@ Hầu hết các endpoint yêu cầu **Bearer JWT Token**.
       { name: "Bids", description: "Đặt bid & lịch sử đấu giá" },
       { name: "Orders", description: "Quản lý đơn hàng" },
       { name: "Wishlist", description: "Danh sách yêu thích" },
+      { name: "Admin", description: "Quản trị seller, user, product, report, order, thống kê" },
       { name: "Health", description: "Server health check" },
     ],
   },

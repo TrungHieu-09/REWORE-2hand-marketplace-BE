@@ -6,6 +6,14 @@ interface SendOtpEmailParams {
   otp: string;
 }
 
+interface SellerReviewEmailParams {
+  to: string;
+  name: string;
+  shopName: string;
+  approved: boolean;
+  reason?: string;
+}
+
 class OtpEmailError extends Error {
   statusCode = 500;
   isOperational = true;
@@ -16,6 +24,43 @@ class OtpEmailError extends Error {
 }
 
 const createOtpEmailError = (): OtpEmailError => new OtpEmailError();
+
+const sendNonCriticalEmail = async ({
+  to,
+  subject,
+  text,
+  html,
+  logLabel,
+}: {
+  to: string;
+  subject: string;
+  text: string;
+  html: string;
+  logLabel: string;
+}): Promise<void> => {
+  const transporter = getTransporter();
+
+  if (!transporter) {
+    if (process.env.NODE_ENV !== "production") {
+      console.warn(`[${logLabel} SKIPPED] SMTP config is missing. to=${to}`);
+    }
+    return;
+  }
+
+  try {
+    const info = await transporter.sendMail({
+      from: getFromAddress(),
+      to,
+      subject,
+      text,
+      html,
+    });
+
+    console.log(`[${logLabel} SENT] to=${to} messageId=${info.messageId}`);
+  } catch (err) {
+    console.error(`[${logLabel} ERROR]`, err);
+  }
+};
 
 const escapeHtml = (value: string): string =>
   value
@@ -106,4 +151,42 @@ export const sendOtpEmail = async ({ to, name, otp }: SendOtpEmailParams): Promi
     console.error("[EMAIL OTP ERROR]", err);
     throw createOtpEmailError();
   }
+};
+
+export const sendSellerReviewResultEmail = async ({
+  to,
+  name,
+  shopName,
+  approved,
+  reason,
+}: SellerReviewEmailParams): Promise<void> => {
+  const safeName = escapeHtml(name);
+  const safeShopName = escapeHtml(shopName);
+  const safeReason = escapeHtml(reason || "Your seller profile did not meet REWORE verification requirements.");
+
+  await sendNonCriticalEmail({
+    to,
+    subject: approved ? "Your REWORE seller profile is approved" : "Your REWORE seller profile was rejected",
+    text: approved
+      ? `Hi ${name}, your seller profile for ${shopName} has been approved.`
+      : `Hi ${name}, your seller profile for ${shopName} was rejected. Reason: ${reason || "Verification requirements not met."}`,
+    html: approved
+      ? `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #231a11;">
+          <h2>Seller profile approved</h2>
+          <p>Hi ${safeName},</p>
+          <p>Your seller profile for <strong>${safeShopName}</strong> has been approved.</p>
+          <p>You can now use seller features on REWORE.</p>
+        </div>
+      `
+      : `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #231a11;">
+          <h2>Seller profile rejected</h2>
+          <p>Hi ${safeName},</p>
+          <p>Your seller profile for <strong>${safeShopName}</strong> was rejected.</p>
+          <p><strong>Reason:</strong> ${safeReason}</p>
+        </div>
+      `,
+    logLabel: "SELLER REVIEW EMAIL",
+  });
 };

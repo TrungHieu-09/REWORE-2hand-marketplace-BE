@@ -270,6 +270,11 @@ router.post("/login", async (req: Request, res: Response, next: NextFunction) =>
       return;
     }
 
+    if (user.isBanned) {
+      res.status(403).json({ success: false, message: "Account is banned" });
+      return;
+    }
+
     const isValid = await bcrypt.compare(password, user.password);
     if (!isValid) {
       res.status(401).json({ success: false, message: "Email hoặc mật khẩu không đúng" });
