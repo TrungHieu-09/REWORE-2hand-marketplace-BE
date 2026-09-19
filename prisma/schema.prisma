@@ -28,6 +28,13 @@ enum ProductStatus {
   REMOVED
 }
 
+enum ProductAvailabilityStatus {
+  upcoming_drop
+  available
+  held
+  sold
+}
+
 enum ProductCondition {
   NEW
   LIKE_NEW
@@ -172,22 +179,24 @@ model SellerStatusHistory {
 }
 
 model Product {
-  id          String           @id @default(cuid())
-  title       String
-  description String
-  price       Float
-  images      String[]
-  category    String
-  condition   ProductCondition @default(GOOD)
-  status      ProductStatus    @default(ACTIVE)
-  brand       String?
-  size        String?
-  color       String?
-  tags        String[]
-  viewCount   Int              @default(0)
-  sellerId    String
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
+  id                 String                    @id @default(cuid())
+  title              String
+  description        String
+  price              Float
+  images             String[]
+  category           String
+  condition          ProductCondition          @default(GOOD)
+  status             ProductStatus             @default(ACTIVE)
+  quantity           Int                       @default(1)
+  availabilityStatus ProductAvailabilityStatus @default(available) @map("availability_status")
+  brand              String?
+  size               String?
+  color              String?
+  tags               String[]
+  viewCount          Int                       @default(0)
+  sellerId           String
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
 
   // Relations
   seller        User           @relation(fields: [sellerId], references: [id], onDelete: Cascade)

@@ -14,6 +14,7 @@ import { authenticate, requireRole } from "../middleware/auth.middleware";
 import { createAdminActionLog } from "../lib/admin-action-log";
 import { sendSellerReviewResultEmail } from "../lib/email";
 import { prisma } from "../lib/prisma";
+import { createSupabaseSignedUrl } from "../lib/supabase-storage";
 
 const router = Router();
 
@@ -35,11 +36,22 @@ const listSchema = z.object({
   sortOrder: z.enum(["asc", "desc"]).optional().default("desc"),
 });
 
-const getPagination = (req: Request) => {
+const getListQuery = (req: Request, res: Response, allowedSortBy: string[]) => {
   const parsed = listSchema.safeParse(req.query);
   if (!parsed.success) {
-    return { page: 1, limit: 20, sortBy: "createdAt", sortOrder: "desc" as const };
+    res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors });
+    return null;
   }
+
+  if (!allowedSortBy.includes(parsed.data.sortBy)) {
+    res.status(400).json({
+      success: false,
+      message: "Invalid sortBy",
+      allowedSortBy,
+    });
+    return null;
+  }
+
   return parsed.data;
 };
 
@@ -49,6 +61,8 @@ const meta = (total: number, page: number, limit: number) => ({
   limit,
   totalPages: Math.ceil(total / limit),
 });
+
+const orderBy = (sortBy: string, sortOrder: "asc" | "desc") => ({ [sortBy]: sortOrder });
 
 const mapSellerStatus = (value?: unknown): SellerProfileStatus | undefined => {
   if (!value) return undefined;
@@ -93,6 +107,25 @@ const mapReportStatus = (value?: unknown): ReportStatus | undefined => {
   return Object.values(ReportStatus).includes(normalized as ReportStatus)
     ? (normalized as ReportStatus)
     : undefined;
+};
+
+const withSignedSellerIdentityUrls = async <T extends {
+  idCardFrontUrl: string;
+  idCardBackUrl: string;
+  selfieUrl: string | null;
+}>(seller: T) => {
+  const [idCardFrontUrl, idCardBackUrl, selfieUrl] = await Promise.all([
+    createSupabaseSignedUrl("id-cards", seller.idCardFrontUrl, 300),
+    createSupabaseSignedUrl("id-cards", seller.idCardBackUrl, 300),
+    createSupabaseSignedUrl("id-cards", seller.selfieUrl, 300),
+  ]);
+
+  return {
+    ...seller,
+    idCardFrontUrl: idCardFrontUrl ?? seller.idCardFrontUrl,
+    idCardBackUrl: idCardBackUrl ?? seller.idCardBackUrl,
+    selfieUrl: selfieUrl ?? seller.selfieUrl,
+  };
 };
 
 const sellerProfileInclude = {
@@ -153,9 +186,22 @@ const getSellerUserIdFromReportTarget = async (report: {
   return order?.sellerId ?? null;
 };
 
+const activeOrderStatuses: OrderStatus[] = ["PENDING", "CONFIRMED", "PAID", "SHIPPED"];
+
+const hasActiveProductOrder = (productId: string) =>
+  prisma.order.findFirst({
+    where: {
+      productId,
+      status: { in: activeOrderStatuses },
+    },
+    select: { id: true, status: true },
+  });
+
 router.get("/sellers", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { page, limit, sortOrder } = getPagination(req);
+    const listQuery = getListQuery(req, res, ["createdAt", "reviewedAt", "shopName", "status"]);
+    if (!listQuery) return;
+    const { page, limit, sortBy, sortOrder } = listQuery;
     const status = mapSellerStatus(req.query.status);
     const where: Prisma.SellerProfileWhereInput = status ? { status } : {};
 
@@ -165,7 +211,7 @@ router.get("/sellers", async (req: Request, res: Response, next: NextFunction) =
         include: sellerProfileInclude,
         skip: (page - 1) * limit,
         take: limit,
-        orderBy: { createdAt: sortOrder },
+        orderBy: orderBy(sortBy, sortOrder) as Prisma.SellerProfileOrderByWithRelationInput,
       }),
       prisma.sellerProfile.count({ where }),
     ]);
@@ -188,7 +234,7 @@ router.get("/sellers/:id", async (req: Request, res: Response, next: NextFunctio
       return;
     }
 
-    res.json({ success: true, data: seller });
+    res.json({ success: true, data: await withSignedSellerIdentityUrls(seller) });
   } catch (err) {
     next(err);
   }
@@ -343,7 +389,9 @@ router.post("/sellers/:id/reject", async (req: Request, res: Response, next: Nex
 
 router.get("/users", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { page, limit, sortOrder } = getPagination(req);
+    const listQuery = getListQuery(req, res, ["createdAt", "email", "name", "role"]);
+    if (!listQuery) return;
+    const { page, limit, sortBy, sortOrder } = listQuery;
     const search = req.query.search ? String(req.query.search).trim() : undefined;
     const status = req.query.status ? String(req.query.status).toLowerCase() : undefined;
     const where: Prisma.UserWhereInput = {
@@ -365,17 +413,33 @@ router.get("/users", async (req: Request, res: Response, next: NextFunction) => 
           id: true,
           email: true,
           name: true,
+          avatar: true,
           phone: true,
+          address: true,
           role: true,
+          reputation: true,
+          totalSales: true,
+          totalBids: true,
           isVerified: true,
           isBanned: true,
           bannedReason: true,
           bannedAt: true,
+          sellerProfile: {
+            select: {
+              id: true,
+              shopName: true,
+              status: true,
+              pickupAddress: true,
+              bankName: true,
+              bankAccountName: true,
+              createdAt: true,
+            },
+          },
           createdAt: true,
         },
         skip: (page - 1) * limit,
         take: limit,
-        orderBy: { createdAt: sortOrder },
+        orderBy: orderBy(sortBy, sortOrder) as Prisma.UserOrderByWithRelationInput,
       }),
       prisma.user.count({ where }),
     ]);
@@ -464,7 +528,9 @@ router.patch("/users/:id/unban", async (req: Request, res: Response, next: NextF
 
 router.get("/products", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { page, limit, sortOrder } = getPagination(req);
+    const listQuery = getListQuery(req, res, ["createdAt", "price", "title", "status", "viewCount", "availabilityStatus"]);
+    if (!listQuery) return;
+    const { page, limit, sortBy, sortOrder } = listQuery;
     const status = mapProductStatus(req.query.status);
     const sellerId = req.query.sellerId ? String(req.query.sellerId) : undefined;
     const where: Prisma.ProductWhereInput = {
@@ -475,10 +541,20 @@ router.get("/products", async (req: Request, res: Response, next: NextFunction) 
     const [data, total] = await Promise.all([
       prisma.product.findMany({
         where,
-        include: { seller: { select: { id: true, email: true, name: true, role: true } } },
+        include: {
+          seller: {
+            select: {
+              id: true,
+              email: true,
+              name: true,
+              role: true,
+              sellerProfile: { select: { shopName: true, status: true } },
+            },
+          },
+        },
         skip: (page - 1) * limit,
         take: limit,
-        orderBy: { createdAt: sortOrder },
+        orderBy: orderBy(sortBy, sortOrder) as Prisma.ProductOrderByWithRelationInput,
       }),
       prisma.product.count({ where }),
     ]);
@@ -491,10 +567,27 @@ router.get("/products", async (req: Request, res: Response, next: NextFunction) 
 
 router.patch("/products/:id/hide", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const parsed = reasonSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+
     const productId = String(req.params.id);
     const existing = await prisma.product.findUnique({ where: { id: productId } });
     if (!existing) {
       res.status(404).json({ success: false, message: "Product not found" });
+      return;
+    }
+
+    const activeOrder = await hasActiveProductOrder(productId);
+    if (activeOrder) {
+      res.status(409).json({
+        success: false,
+        message: "Product has an active order and cannot be hidden",
+        orderId: activeOrder.id,
+        orderStatus: activeOrder.status,
+      });
       return;
     }
 
@@ -509,6 +602,7 @@ router.patch("/products/:id/hide", async (req: Request, res: Response, next: Nex
         actionType: "PRODUCT_HIDE",
         targetType: "PRODUCT",
         targetId: productId,
+        note: parsed.data.reason,
       });
 
       return hidden;
@@ -522,10 +616,27 @@ router.patch("/products/:id/hide", async (req: Request, res: Response, next: Nex
 
 router.delete("/products/:id", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const parsed = reasonSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+
     const productId = String(req.params.id);
     const existing = await prisma.product.findUnique({ where: { id: productId } });
     if (!existing) {
       res.status(404).json({ success: false, message: "Product not found" });
+      return;
+    }
+
+    const activeOrder = await hasActiveProductOrder(productId);
+    if (activeOrder) {
+      res.status(409).json({
+        success: false,
+        message: "Product has an active order and cannot be removed",
+        orderId: activeOrder.id,
+        orderStatus: activeOrder.status,
+      });
       return;
     }
 
@@ -540,6 +651,7 @@ router.delete("/products/:id", async (req: Request, res: Response, next: NextFun
         actionType: "PRODUCT_REMOVE",
         targetType: "PRODUCT",
         targetId: productId,
+        note: parsed.data.reason,
       });
 
       return removed;
@@ -553,7 +665,9 @@ router.delete("/products/:id", async (req: Request, res: Response, next: NextFun
 
 router.get("/reports", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { page, limit, sortOrder } = getPagination(req);
+    const listQuery = getListQuery(req, res, ["createdAt", "status", "resolvedAt"]);
+    if (!listQuery) return;
+    const { page, limit, sortBy, sortOrder } = listQuery;
     const status = mapReportStatus(req.query.status);
     const where: Prisma.ReportWhereInput = status ? { status } : {};
 
@@ -563,7 +677,7 @@ router.get("/reports", async (req: Request, res: Response, next: NextFunction) =
         include: reportInclude,
         skip: (page - 1) * limit,
         take: limit,
-        orderBy: { createdAt: sortOrder },
+        orderBy: orderBy(sortBy, sortOrder) as Prisma.ReportOrderByWithRelationInput,
       }),
       prisma.report.count({ where }),
     ]);
@@ -677,7 +791,9 @@ router.post("/reports/:id/resolve", async (req: Request, res: Response, next: Ne
 
 router.get("/orders", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { page, limit, sortOrder } = getPagination(req);
+    const listQuery = getListQuery(req, res, ["createdAt", "totalPrice", "paymentStatus", "status", "paidAt"]);
+    if (!listQuery) return;
+    const { page, limit, sortBy, sortOrder } = listQuery;
     const paymentStatus = mapPaymentStatus(req.query.paymentStatus);
     const orderStatus = mapOrderStatus(req.query.orderStatus);
     const where: Prisma.OrderWhereInput = {
@@ -691,7 +807,7 @@ router.get("/orders", async (req: Request, res: Response, next: NextFunction) =>
         include: orderInclude,
         skip: (page - 1) * limit,
         take: limit,
-        orderBy: { createdAt: sortOrder },
+        orderBy: orderBy(sortBy, sortOrder) as Prisma.OrderOrderByWithRelationInput,
       }),
       prisma.order.count({ where }),
     ]);

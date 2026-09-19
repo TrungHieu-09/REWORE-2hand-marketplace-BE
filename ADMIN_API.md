@@ -45,12 +45,21 @@ Query:
 status=pending|approved|rejected|suspended
 page=1
 limit=20
+sortBy=createdAt|reviewedAt|shopName|status
 sortOrder=desc
 ```
 
 ### GET /admin/sellers/:id
 
-Returns seller profile detail with ID card URLs, user info, review admin, and status history.
+Returns seller profile detail with ID card signed URLs, user info, review admin, and status history.
+
+`id-cards` is a private Supabase Storage bucket. The raw DB values are internal bucket paths, but this endpoint replaces:
+
+- `idCardFrontUrl`
+- `idCardBackUrl`
+- `selfieUrl`
+
+with signed URLs that expire after 5 minutes. FE should call this endpoint again when admin needs to reload expired images.
 
 ### POST /admin/sellers/:id/approve
 
@@ -79,6 +88,7 @@ search=email-or-name-or-phone
 status=active|banned
 page=1
 limit=20
+sortBy=createdAt|email|name|role
 sortOrder=desc
 ```
 
@@ -107,16 +117,50 @@ status=ACTIVE|SOLD|AUCTION|INACTIVE|HIDDEN|REMOVED
 sellerId=user-id
 page=1
 limit=20
+sortBy=createdAt|price|title|status|viewCount|availabilityStatus
 sortOrder=desc
 ```
 
+Response product includes read-only transaction fields:
+
+```json
+{
+  "quantity": 1,
+  "availabilityStatus": "available"
+}
+```
+
+`status` is the admin moderation status. `availabilityStatus` is transaction availability for future hold/drop flows; admin APIs do not update it directly.
+
+Product seller payload includes `seller.sellerProfile.shopName` so the admin UI can show shop name while still keeping account fields like `seller.name` and `seller.email` for review.
+
 ### PATCH /admin/products/:id/hide
+
+Body:
+
+```json
+{
+  "reason": "Listing violates marketplace policy"
+}
+```
 
 Sets product status to `HIDDEN`.
 
+Returns `409` if product has an active order (`PENDING`, `CONFIRMED`, `PAID`, `SHIPPED`).
+
 ### DELETE /admin/products/:id
 
+Body:
+
+```json
+{
+  "reason": "Counterfeit item"
+}
+```
+
 Soft-removes product by setting status to `REMOVED`.
+
+Returns `409` if product has an active order (`PENDING`, `CONFIRMED`, `PAID`, `SHIPPED`).
 
 ## Reports
 
@@ -128,6 +172,7 @@ Query:
 status=open|resolved|dismissed
 page=1
 limit=20
+sortBy=createdAt|status|resolvedAt
 sortOrder=desc
 ```
 
@@ -167,6 +212,7 @@ paymentStatus=UNPAID|PAID|REFUNDED
 orderStatus=PENDING|CONFIRMED|PAID|SHIPPED|DELIVERED|COMPLETED|CANCELLED|REFUNDED
 page=1
 limit=20
+sortBy=createdAt|totalPrice|paymentStatus|status|paidAt
 sortOrder=desc
 ```
 

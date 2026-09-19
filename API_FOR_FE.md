@@ -47,7 +47,9 @@ Authorization: Bearer <token>
 ```ts
 type Role = "BUYER" | "SELLER" | "ADMIN";
 
-type ProductStatus = "ACTIVE" | "SOLD" | "AUCTION" | "INACTIVE";
+type ProductStatus = "ACTIVE" | "SOLD" | "AUCTION" | "INACTIVE" | "HIDDEN" | "REMOVED";
+
+type ProductAvailabilityStatus = "upcoming_drop" | "available" | "held" | "sold";
 
 type ProductCondition = "NEW" | "LIKE_NEW" | "GOOD" | "FAIR" | "POOR";
 
@@ -77,7 +79,7 @@ Response:
 
 Public. Dang ky tai khoan moi va gui OTP email. Endpoint nay khong login ngay, khong tra token.
 
-Body:
+Body JSON cu van duoc ho tro neu FE da co URL anh san pham san:
 
 ```json
 {
@@ -422,6 +424,8 @@ Response:
       "category": "Clothing",
       "condition": "LIKE_NEW",
       "status": "ACTIVE",
+      "quantity": 1,
+      "availabilityStatus": "available",
       "brand": "Levi's",
       "size": "M",
       "color": "Blue",
@@ -430,10 +434,12 @@ Response:
       "sellerId": "sellerId",
       "seller": {
         "id": "sellerId",
-        "name": "Seller",
+        "name": "REWORE Vintage",
+        "shopName": "REWORE Vintage",
+        "accountName": "Nguyen Van A",
         "avatar": null,
         "reputation": 0,
-        "isVerified": false
+        "isVerified": true
       },
       "_count": {
         "wishlistItems": 0
@@ -470,6 +476,7 @@ Body:
   "price": 350000,
   "category": "Clothing",
   "condition": "LIKE_NEW",
+  "quantity": 1,
   "images": ["https://example.com/image.jpg"],
   "brand": "Levi's",
   "size": "M",
@@ -486,12 +493,35 @@ Validate:
 - `description`: toi thieu 10 ky tu
 - `price`: so duong
 - `condition`: `NEW`, `LIKE_NEW`, `GOOD`, `FAIR`, `POOR`
+- `quantity`: optional, mac dinh `1`; neu FE gui thi bat buoc bang `1`
+
+Neu FE upload file anh san pham moi, gui `multipart/form-data`:
+
+| Field | Type | Required | Ghi chu |
+| --- | --- | --- | --- |
+| `title` | string | yes | |
+| `description` | string | yes | |
+| `price` | number/string | yes | |
+| `category` | string | yes | |
+| `condition` | enum | yes | `NEW`, `LIKE_NEW`, `GOOD`, `FAIR`, `POOR` |
+| `quantity` | number/string | no | Neu gui phai bang `1` |
+| `images` | file[] hoac string[] | no | File anh se upload Supabase; URL string cu van duoc ho tro |
+| `productImages` | file[] | no | Alias rieng cho file anh san pham |
+| `tags` | string[]/JSON/comma string | no | |
+
+File anh san pham gioi han JPG/PNG/WEBP, toi da 5MB/file. Backend upload vao bucket public `product-images` va luu public URL day du vao `Product.images`.
+
+Luu y: `availabilityStatus` khong nam trong body tao/sua san pham. Backend tu set mac dinh `available`; cac tinh nang Giu Hang/San Drop sau nay moi cap nhat field nay.
+
+Luu y hien thi seller: cac response san pham public se tra `seller.name` la ten hien thi public. Neu seller da duoc approve va co shop, `seller.name = seller.shopName`; ten account goc nam trong `seller.accountName`.
 
 ### `PUT /api/products/:id`
 
 Auth required. Chi chu san pham hoac `ADMIN`.
 
 Body giong create product nhung tat ca field optional.
+
+Luu y: khong gui `quantity` va `availabilityStatus` khi update; backend khong cho sua 2 field nay qua API product/update hien tai.
 
 ### `DELETE /api/products/:id`
 
@@ -817,6 +847,16 @@ type User = {
   updatedAt?: string;
 };
 
+type PublicSeller = {
+  id: string;
+  name: string; // Ten hien thi public, uu tien shopName neu seller da duyet
+  shopName: string | null;
+  accountName: string; // Ten account/user goc
+  avatar: string | null;
+  reputation: number;
+  isVerified: boolean;
+};
+
 type RegisterOtpResponse = {
   success: true;
   message: "OTP sent to email";
@@ -852,13 +892,15 @@ type Product = {
   category: string;
   condition: ProductCondition;
   status: ProductStatus;
+  quantity: 1;
+  availabilityStatus: ProductAvailabilityStatus;
   brand: string | null;
   size: string | null;
   color: string | null;
   tags: string[];
   viewCount: number;
   sellerId: string;
-  seller?: Pick<User, "id" | "name" | "avatar" | "reputation" | "isVerified">;
+  seller?: PublicSeller;
   _count?: {
     wishlistItems: number;
   };
@@ -879,7 +921,7 @@ type Auction = {
   status: AuctionStatus;
   winnerId: string | null;
   product?: Product;
-  seller?: Pick<User, "id" | "name" | "avatar" | "reputation" | "isVerified">;
+  seller?: PublicSeller;
   bids?: Bid[];
   _count?: {
     bids: number;
@@ -930,12 +972,80 @@ type WishlistItem = {
 };
 ```
 
+## Seller Application API
+
+### GET /api/seller/application
+
+Auth required. Lay ho so seller hien tai cua user dang dang nhap.
+
+### POST /api/seller/application
+
+Auth required. Submit ho so seller bang `multipart/form-data`; KHONG gui JSON/base64/blob URL cho anh CCCD.
+
+Text fields:
+
+| Field | Type | Required | Ghi chu |
+| --- | --- | --- | --- |
+| `shopName` | string | yes | Ten shop hien thi cong khai |
+| `legalName` | string | yes | Ho ten that, dung de doi chieu CCCD/ngan hang |
+| `phone` | string | yes | SDT lien he |
+| `pickupAddress` | string | yes | Dia chi lay hang/giao dich |
+| `bankName` | string | no | Ten ngan hang |
+| `bankAccountNumber` | string | yes | So tai khoan |
+| `bankAccountHolder` | string | yes | Phai trung `legalName` sau khi normalize dau/cach |
+| `vietQr` | string | no | URL/ref VietQR neu FE co |
+| `sellingDescription` | string | no | Mo ta loai do se ban |
+| `acceptedSellerTerms` | string | yes | Gui `"true"` |
+
+File fields:
+
+| Field | Required | Gioi han |
+| --- | --- | --- |
+| `idCardFrontImage` | yes | JPG/PNG/WEBP, toi da 5MB |
+| `idCardBackImage` | yes | JPG/PNG/WEBP, toi da 5MB |
+| `selfieImage` | no | JPG/PNG/WEBP, toi da 5MB |
+
+Response thanh cong `201`:
+
+```json
+{
+  "success": true,
+  "message": "Seller application submitted and pending verification",
+  "sellerStatus": "PENDING",
+  "application": {
+    "id": "sellerProfileId",
+    "idCardFrontUrl": "seller-applications/front.png",
+    "idCardBackUrl": "seller-applications/back.png",
+    "selfieUrl": "seller-applications/selfie.png",
+    "status": "PENDING"
+  }
+}
+```
+
+Bucket `id-cards` la private, nen response submit seller va DB chi luu path trong bucket. FE buyer khong hien thi truc tiep anh CCCD tu response nay.
+
+Admin xem chi tiet seller qua `GET /api/admin/sellers/:id` se nhan signed URL song 5 phut:
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "sellerProfileId",
+    "idCardFrontUrl": "https://...supabase.co/storage/v1/object/sign/id-cards/seller-applications/front.png?...",
+    "idCardBackUrl": "https://...signed...",
+    "selfieUrl": "https://...signed..."
+  }
+}
+```
+
+FE admin khong nen cache signed URL qua lau. Neu anh het han khi drawer mo lau, goi lai `GET /api/admin/sellers/:id` de lay signed URL moi.
+
 ## Luu y quan trong cho FE
 
 - Flow register hien tai bat buoc verify OTP truoc khi login. User chua verify se bi xoa sau 6 phut neu khong xac thuc OTP, de email co the dang ky lai. Neu chua cau hinh SMTP, BE se tra `500` voi message `Unable to send OTP email`; local dev van in OTP ra console voi prefix `[DEV OTP]` de debug. Production can cau hinh `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_SECURE`.
-- Hien tai backend chua co API upload anh. `images` va `avatar` dang nhan URL string.
+- Backend upload anh CCCD/selfie cho seller application len Supabase Storage bucket private `id-cards`; admin detail tra signed URL 5 phut. Backend upload anh san pham len bucket public `product-images` va luu public URL vao `Product.images`.
 - Hien tai backend chua co API tao order (`POST /api/orders`) va chua co checkout/payment API. Route order chi co list, detail va update status.
 - Hien tai backend chua co API ket thuc auction tu dong, chon winner, hay tao order tu auction winner.
 - Hien tai backend chua co route cho review du model Prisma co bang `Review`.
-- Role user mac dinh khi register la `BUYER`; code hien tai chua co API doi role thanh `SELLER`.
+- Role user mac dinh khi register la `BUYER`; user chi thanh `SELLER` sau khi admin approve seller application.
 - Nen uu tien dung Swagger JSON `/api-docs.json` neu FE muon generate client tu OpenAPI, nhung docs nay da ghi them cac side effect/constraint trong code.

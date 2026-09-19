@@ -493,6 +493,13 @@ router.get("/me", authenticate, async (req: Request, res: Response, next: NextFu
         id: true, email: true, name: true, avatar: true, bio: true,
         phone: true, address: true, role: true, reputation: true,
         totalSales: true, totalBids: true, isVerified: true, createdAt: true,
+        sellerProfile: {
+          select: {
+            status: true,
+            reviewedAt: true,
+            rejectedReason: true,
+          },
+        },
       },
     });
 
@@ -501,7 +508,16 @@ router.get("/me", authenticate, async (req: Request, res: Response, next: NextFu
       return;
     }
 
-    res.json({ success: true, user });
+    const { sellerProfile, ...userWithoutSellerProfile } = user;
+    res.json({
+      success: true,
+      user: {
+        ...userWithoutSellerProfile,
+        sellerStatus: sellerProfile?.status ?? "NONE",
+        sellerApprovedAt: sellerProfile?.status === "APPROVED" ? sellerProfile.reviewedAt : null,
+        sellerSuspendedReason: sellerProfile?.status === "SUSPENDED" ? sellerProfile.rejectedReason : null,
+      },
+    });
   } catch (err) {
     next(err);
   }

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { authenticate } from "../middleware/auth.middleware";
 import { prisma } from "../lib/prisma";
 import { canSell, getSellingUser, sellerBlockedResponse } from "../lib/seller-permissions";
+import { formatProductSeller, formatPublicSeller, publicSellerSelect } from "../lib/public-seller";
 
 const router = Router();
 
@@ -15,10 +16,16 @@ const createAuctionSchema = z.object({
 });
 
 const auctionInclude = {
-  product: { include: { seller: { select: { id: true, name: true, avatar: true, reputation: true } } } },
-  seller: { select: { id: true, name: true, avatar: true, reputation: true, isVerified: true } },
+  product: { include: { seller: { select: publicSellerSelect } } },
+  seller: { select: publicSellerSelect },
   _count: { select: { bids: true } },
 };
+
+const formatAuctionSeller = <T extends { product?: Parameters<typeof formatProductSeller>[0] | null; seller?: Parameters<typeof formatPublicSeller>[0] }>(auction: T) => ({
+  ...auction,
+  product: auction.product ? formatProductSeller(auction.product) : auction.product,
+  seller: formatPublicSeller(auction.seller),
+});
 
 /**
  * @openapi
@@ -59,7 +66,7 @@ router.get("/", async (req: Request, res: Response, next: NextFunction) => {
       prisma.auction.count({ where }),
     ]);
 
-    res.json({ success: true, data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } });
+    res.json({ success: true, data: data.map(formatAuctionSeller), meta: { total, page, limit, totalPages: Math.ceil(total / limit) } });
   } catch (err) { next(err); }
 });
 
@@ -88,7 +95,7 @@ router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
       include: { ...auctionInclude, bids: { include: { bidder: { select: { id: true, name: true, avatar: true } } }, orderBy: { createdAt: "desc" }, take: 10 } },
     });
     if (!auction) { res.status(404).json({ success: false, message: "Phiên đấu giá không tìm thấy" }); return; }
-    res.json({ success: true, data: auction });
+    res.json({ success: true, data: formatAuctionSeller(auction) });
   } catch (err) { next(err); }
 });
 
@@ -147,7 +154,7 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
     // Update product status to AUCTION
     await prisma.product.update({ where: { id: productId }, data: { status: "AUCTION" } });
 
-    res.status(201).json({ success: true, data: auction });
+    res.status(201).json({ success: true, data: formatAuctionSeller(auction) });
   } catch (err) { next(err); }
 });
 
