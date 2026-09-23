@@ -2,6 +2,8 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { authenticate } from "../middleware/auth.middleware";
 import { prisma } from "../lib/prisma";
+import { canSell, getSellingUser, sellerBlockedResponse } from "../lib/seller-permissions";
+import { formatProductSeller, formatPublicSeller, publicSellerSelect } from "../lib/public-seller";
 
 const router = Router();
 
@@ -14,10 +16,16 @@ const createAuctionSchema = z.object({
 });
 
 const auctionInclude = {
-  product: { include: { seller: { select: { id: true, name: true, avatar: true, reputation: true } } } },
-  seller: { select: { id: true, name: true, avatar: true, reputation: true, isVerified: true } },
+  product: { include: { seller: { select: publicSellerSelect } } },
+  seller: { select: publicSellerSelect },
   _count: { select: { bids: true } },
 };
+
+const formatAuctionSeller = <T extends { product?: Parameters<typeof formatProductSeller>[0] | null; seller?: Parameters<typeof formatPublicSeller>[0] }>(auction: T) => ({
+  ...auction,
+  product: auction.product ? formatProductSeller(auction.product) : auction.product,
+  seller: formatPublicSeller(auction.seller),
+});
 
 /**
  * @openapi
@@ -58,7 +66,7 @@ router.get("/", async (req: Request, res: Response, next: NextFunction) => {
       prisma.auction.count({ where }),
     ]);
 
-    res.json({ success: true, data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } });
+    res.json({ success: true, data: data.map(formatAuctionSeller), meta: { total, page, limit, totalPages: Math.ceil(total / limit) } });
   } catch (err) { next(err); }
 });
 
@@ -81,12 +89,13 @@ router.get("/", async (req: Request, res: Response, next: NextFunction) => {
  */
 router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const auctionId = String(req.params.id);
     const auction = await prisma.auction.findUnique({
-      where: { id: req.params.id },
+      where: { id: auctionId },
       include: { ...auctionInclude, bids: { include: { bidder: { select: { id: true, name: true, avatar: true } } }, orderBy: { createdAt: "desc" }, take: 10 } },
     });
     if (!auction) { res.status(404).json({ success: false, message: "Phiên đấu giá không tìm thấy" }); return; }
-    res.json({ success: true, data: auction });
+    res.json({ success: true, data: formatAuctionSeller(auction) });
   } catch (err) { next(err); }
 });
 
@@ -112,6 +121,12 @@ router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
  */
 router.post("/", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const seller = await getSellingUser(req.user!.userId);
+    if (!canSell(seller)) {
+      res.status(403).json(sellerBlockedResponse(seller?.sellerProfile?.status));
+      return;
+    }
+
     const parsed = createAuctionSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors }); return;
@@ -125,7 +140,7 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
     // Verify product belongs to this seller
     const product = await prisma.product.findUnique({ where: { id: productId } });
     if (!product) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
-    if (product.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
+    if (product.sellerId !== req.user!.userId && seller?.role !== "ADMIN") {
       res.status(403).json({ success: false, message: "Sản phẩm không thuộc về bạn" }); return;
     }
 
@@ -139,7 +154,7 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
     // Update product status to AUCTION
     await prisma.product.update({ where: { id: productId }, data: { status: "AUCTION" } });
 
-    res.status(201).json({ success: true, data: auction });
+    res.status(201).json({ success: true, data: formatAuctionSeller(auction) });
   } catch (err) { next(err); }
 });
 
@@ -162,15 +177,22 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
  */
 router.patch("/:id/cancel", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const auction = await prisma.auction.findUnique({ where: { id: req.params.id } });
+    const auctionId = String(req.params.id);
+    const seller = await getSellingUser(req.user!.userId);
+    if (!seller) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
+    const auction = await prisma.auction.findUnique({ where: { id: auctionId } });
     if (!auction) { res.status(404).json({ success: false, message: "Phiên đấu giá không tìm thấy" }); return; }
-    if (auction.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
+    if (seller.role !== "ADMIN" && (auction.sellerId !== req.user!.userId || !canSell(seller))) {
       res.status(403).json({ success: false, message: "Không có quyền hủy phiên đấu giá này" }); return;
     }
     if (auction.status === "ENDED" || auction.status === "CANCELLED") {
       res.status(400).json({ success: false, message: "Phiên đấu giá đã kết thúc hoặc đã bị hủy" }); return;
     }
-    const updated = await prisma.auction.update({ where: { id: req.params.id }, data: { status: "CANCELLED" } });
+    const updated = await prisma.auction.update({ where: { id: auctionId }, data: { status: "CANCELLED" } });
     // Revert product status
     await prisma.product.update({ where: { id: auction.productId }, data: { status: "ACTIVE" } });
     res.json({ success: true, message: "Phiên đấu giá đã bị hủy", data: updated });

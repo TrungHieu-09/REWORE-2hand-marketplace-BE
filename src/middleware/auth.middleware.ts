@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
+import { prisma } from "../lib/prisma";
 
 const JWT_SECRET = process.env.JWT_SECRET || "rewore_secret_key_change_in_prod";
 
@@ -18,7 +19,7 @@ declare global {
   }
 }
 
-export const authenticate = (req: Request, res: Response, next: NextFunction): void => {
+export const authenticate = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -30,7 +31,22 @@ export const authenticate = (req: Request, res: Response, next: NextFunction): v
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
-    req.user = decoded;
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+      select: { id: true, email: true, role: true, isBanned: true },
+    });
+
+    if (!user) {
+      res.status(401).json({ success: false, message: "Unauthorized: User not found" });
+      return;
+    }
+
+    if (user.isBanned) {
+      res.status(403).json({ success: false, message: "Account is banned" });
+      return;
+    }
+
+    req.user = { userId: user.id, email: user.email, role: user.role };
     next();
   } catch {
     res.status(401).json({ success: false, message: "Unauthorized: Invalid or expired token" });

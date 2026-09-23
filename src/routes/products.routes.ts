@@ -2,26 +2,49 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { authenticate } from "../middleware/auth.middleware";
 import { prisma } from "../lib/prisma";
-import { Prisma } from "@prisma/client";
+import { Prisma } from ".prisma/client";
+import { canSell, getSellingUser, sellerBlockedResponse } from "../lib/seller-permissions";
+import { removeSupabaseObjects, uploadToSupabase } from "../lib/supabase-storage";
+import { getProductImageUploadFiles, ProductImageUploadFiles, uploadProductImages } from "../middleware/upload.middleware";
+import { formatProductSeller, publicSellerSelect } from "../lib/public-seller";
 
 const router = Router();
+
+const parseOptionalStringArray = (value: unknown) => {
+  if (value === undefined) return undefined;
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return value;
+
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return Array.isArray(parsed) ? parsed : [trimmed];
+  } catch {
+    return trimmed.split(",").map((item) => item.trim()).filter(Boolean);
+  }
+};
 
 const createProductSchema = z.object({
   title: z.string().min(3, "Tên sản phẩm tối thiểu 3 ký tự"),
   description: z.string().min(10, "Mô tả tối thiểu 10 ký tự"),
-  price: z.number().positive("Giá phải là số dương"),
+  price: z.coerce.number().positive("Giá phải là số dương"),
   category: z.string().min(1),
   condition: z.enum(["NEW", "LIKE_NEW", "GOOD", "FAIR", "POOR"]),
-  images: z.array(z.string()).optional().default([]),
+  quantity: z.coerce.number().int().refine((value) => value === 1, "Quantity must be 1 for second-hand products").optional().default(1),
+  images: z.preprocess(parseOptionalStringArray, z.array(z.string()).optional().default([])),
   brand: z.string().optional(),
   size: z.string().optional(),
   color: z.string().optional(),
-  tags: z.array(z.string()).optional().default([]),
+  tags: z.preprocess(parseOptionalStringArray, z.array(z.string()).optional().default([])),
 });
+
+const updateProductSchema = createProductSchema.omit({ quantity: true }).partial();
 
 const productInclude = {
   seller: {
-    select: { id: true, name: true, avatar: true, reputation: true, isVerified: true },
+    select: publicSellerSelect,
   },
   _count: { select: { wishlistItems: true } },
 };
@@ -96,7 +119,7 @@ router.get("/", async (req: Request, res: Response, next: NextFunction) => {
       prisma.product.count({ where }),
     ]);
 
-    res.json({ success: true, data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } });
+    res.json({ success: true, data: data.map(formatProductSeller), meta: { total, page, limit, totalPages: Math.ceil(total / limit) } });
   } catch (err) { next(err); }
 });
 
@@ -119,14 +142,15 @@ router.get("/", async (req: Request, res: Response, next: NextFunction) => {
  */
 router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const productId = String(req.params.id);
     const product = await prisma.product.findUnique({
-      where: { id: req.params.id },
+      where: { id: productId },
       include: { ...productInclude, auction: true },
     });
     if (!product) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
 
     // Tăng view count
-    await prisma.product.update({ where: { id: req.params.id }, data: { viewCount: { increment: 1 } } });
+    await prisma.product.update({ where: { id: productId }, data: { viewCount: { increment: 1 } } });
 
     res.json({ success: true, data: product });
   } catch (err) { next(err); }
@@ -152,18 +176,44 @@ router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
  *       400:
  *         description: Validation error
  */
-router.post("/", authenticate, async (req: Request, res: Response, next: NextFunction) => {
+router.post("/", authenticate, uploadProductImages, async (req: Request, res: Response, next: NextFunction) => {
+  const productImageFiles = getProductImageUploadFiles(req.files as ProductImageUploadFiles | undefined);
+  const uploadedProductPaths: string[] = [];
+
   try {
+    const seller = await getSellingUser(req.user!.userId);
+    if (!canSell(seller)) {
+      res.status(403).json(sellerBlockedResponse(seller?.sellerProfile?.status));
+      return;
+    }
+
     const parsed = createProductSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors }); return;
     }
+
+    const uploadedImages = await Promise.all(
+      productImageFiles.map(async (file) => {
+        const uploaded = await uploadToSupabase(file, "product-images", "products");
+        uploadedProductPaths.push(uploaded.path);
+        return uploaded.publicUrl;
+      })
+    );
+
+    const images = [
+      ...parsed.data.images,
+      ...uploadedImages.filter((url): url is string => Boolean(url)),
+    ];
+
     const product = await prisma.product.create({
-      data: { ...parsed.data, sellerId: req.user!.userId },
+      data: { ...parsed.data, images, sellerId: req.user!.userId },
       include: productInclude,
     });
-    res.status(201).json({ success: true, data: product });
-  } catch (err) { next(err); }
+    res.status(201).json({ success: true, data: formatProductSeller(product) });
+  } catch (err) {
+    await removeSupabaseObjects("product-images", uploadedProductPaths);
+    next(err);
+  }
 });
 
 /**
@@ -191,20 +241,48 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
  *       403:
  *         description: Không phải chủ sản phẩm
  */
-router.put("/:id", authenticate, async (req: Request, res: Response, next: NextFunction) => {
+router.put("/:id", authenticate, uploadProductImages, async (req: Request, res: Response, next: NextFunction) => {
+  const productImageFiles = getProductImageUploadFiles(req.files as ProductImageUploadFiles | undefined);
+  const uploadedProductPaths: string[] = [];
+
   try {
-    const existing = await prisma.product.findUnique({ where: { id: req.params.id } });
+    const productId = String(req.params.id);
+    const seller = await getSellingUser(req.user!.userId);
+    if (!seller) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
+    const existing = await prisma.product.findUnique({ where: { id: productId } });
     if (!existing) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
-    if (existing.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
+    if (seller.role !== "ADMIN" && (existing.sellerId !== req.user!.userId || !canSell(seller))) {
       res.status(403).json({ success: false, message: "Không có quyền sửa sản phẩm này" }); return;
     }
-    const parsed = createProductSchema.partial().safeParse(req.body);
+    const parsed = updateProductSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors }); return;
     }
-    const product = await prisma.product.update({ where: { id: req.params.id }, data: parsed.data, include: productInclude });
-    res.json({ success: true, data: product });
-  } catch (err) { next(err); }
+
+    const uploadedImages = await Promise.all(
+      productImageFiles.map(async (file) => {
+        const uploaded = await uploadToSupabase(file, "product-images", "products");
+        uploadedProductPaths.push(uploaded.path);
+        return uploaded.publicUrl;
+      })
+    );
+
+    const imageUrls = uploadedImages.filter((url): url is string => Boolean(url));
+    const data = {
+      ...parsed.data,
+      ...(imageUrls.length ? { images: [...(parsed.data.images ?? []), ...imageUrls] } : {}),
+    };
+
+    const product = await prisma.product.update({ where: { id: productId }, data, include: productInclude });
+    res.json({ success: true, data: formatProductSeller(product) });
+  } catch (err) {
+    await removeSupabaseObjects("product-images", uploadedProductPaths);
+    next(err);
+  }
 });
 
 /**
@@ -226,12 +304,19 @@ router.put("/:id", authenticate, async (req: Request, res: Response, next: NextF
  */
 router.delete("/:id", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const existing = await prisma.product.findUnique({ where: { id: req.params.id } });
+    const productId = String(req.params.id);
+    const seller = await getSellingUser(req.user!.userId);
+    if (!seller) {
+      res.status(401).json({ success: false, message: "Unauthorized" });
+      return;
+    }
+
+    const existing = await prisma.product.findUnique({ where: { id: productId } });
     if (!existing) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
-    if (existing.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
+    if (seller.role !== "ADMIN" && (existing.sellerId !== req.user!.userId || !canSell(seller))) {
       res.status(403).json({ success: false, message: "Không có quyền xóa sản phẩm này" }); return;
     }
-    await prisma.product.delete({ where: { id: req.params.id } });
+    await prisma.product.delete({ where: { id: productId } });
     res.json({ success: true, message: "Sản phẩm đã được xóa" });
   } catch (err) { next(err); }
 });
