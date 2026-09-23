@@ -15,6 +15,7 @@ import wishlistRoutes from "./routes/wishlist.routes";
 import adminRoutes from "./routes/admin.routes";
 import sellerRoutes from "./routes/seller.routes";
 import { startPendingRegistrationCleanupJob } from "./lib/pending-registration-cleanup";
+import { startAuctionCloserJob } from "./lib/auction-closer";
 
 // Middleware
 import { errorHandler } from "./middleware/error.middleware";
@@ -99,6 +100,7 @@ app.use(errorHandler);
 
 // ─── Start Server ─────────────────────────────────────────────────────────────
 startPendingRegistrationCleanupJob();
+startAuctionCloserJob();
 
 app.listen(PORT, () => {
   console.log(`\n🚀 REWORE Server running on http://localhost:${PORT}`);

@@ -5,6 +5,15 @@ import { prisma } from "../lib/prisma";
 
 const router = Router();
 
+// ─── Schemas ──────────────────────────────────────────────────────────────────
+
+const createOrderSchema = z.object({
+  productId: z.string().min(1, "productId là bắt buộc"),
+  shippingAddress: z.string().min(5, "Địa chỉ giao hàng là bắt buộc"),
+  shippingFee: z.coerce.number().min(0).optional().default(0),
+  note: z.string().optional(),
+});
+
 const updateStatusSchema = z.object({
   status: z.enum(["PAID", "SHIPPED", "DELIVERED", "CANCELLED", "REFUNDED"]),
 });
@@ -15,6 +24,107 @@ const orderInclude = {
   product: { select: { id: true, title: true, images: true, category: true, price: true } },
   auction: { select: { id: true, currentBid: true, endTime: true } },
 };
+
+/**
+ * @openapi
+ * /api/orders:
+ *   post:
+ *     tags: [Orders]
+ *     summary: Tạo đơn hàng mới (mua sản phẩm trực tiếp)
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [productId, shippingAddress]
+ *             properties:
+ *               productId: { type: string }
+ *               shippingAddress: { type: string }
+ *               shippingFee: { type: number, default: 0 }
+ *               note: { type: string }
+ *     responses:
+ *       201:
+ *         description: Tạo đơn hàng thành công
+ *       400:
+ *         description: Validation error hoặc sản phẩm không hợp lệ
+ *       403:
+ *         description: Không thể mua sản phẩm của chính mình
+ *       404:
+ *         description: Sản phẩm không tìm thấy
+ *       409:
+ *         description: Sản phẩm đã không còn hàng
+ */
+router.post("/", authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const parsed = createOrderSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+
+    const { productId, shippingAddress, shippingFee, note } = parsed.data;
+    const buyerId = req.user!.userId;
+
+    // Lấy thông tin sản phẩm
+    const product = await prisma.product.findUnique({ where: { id: productId } });
+    if (!product) {
+      res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" });
+      return;
+    }
+
+    // Không cho mua sản phẩm của chính mình
+    if (product.sellerId === buyerId) {
+      res.status(403).json({ success: false, message: "Bạn không thể mua sản phẩm của chính mình" });
+      return;
+    }
+
+    // Chỉ cho mua sản phẩm đang ACTIVE
+    if (product.status !== "ACTIVE") {
+      res.status(409).json({ success: false, message: "Sản phẩm hiện không còn hàng hoặc đang được đấu giá" });
+      return;
+    }
+
+    // Kiểm tra đã có đơn hàng pending cho sản phẩm này chưa
+    const existingOrder = await prisma.order.findFirst({
+      where: { productId, status: { in: ["PENDING", "CONFIRMED", "PAID", "SHIPPED"] } },
+    });
+    if (existingOrder) {
+      res.status(409).json({ success: false, message: "Sản phẩm này đang có đơn hàng đang xử lý" });
+      return;
+    }
+
+    // Tạo order và cập nhật status sản phẩm trong transaction
+    const order = await prisma.$transaction(async (tx) => {
+      const newOrder = await tx.order.create({
+        data: {
+          buyerId,
+          sellerId: product.sellerId,
+          productId,
+          totalPrice: product.price,
+          shippingFee: shippingFee ?? 0,
+          shippingAddress,
+          note: note ?? null,
+          status: "PENDING",
+          paymentStatus: "UNPAID",
+        },
+        include: orderInclude,
+      });
+
+      // Đánh dấu sản phẩm đang được giữ (tạm INACTIVE)
+      await tx.product.update({
+        where: { id: productId },
+        data: { status: "INACTIVE" },
+      });
+
+      return newOrder;
+    });
+
+    res.status(201).json({ success: true, message: "Đặt hàng thành công", data: order });
+  } catch (err) { next(err); }
+});
 
 /**
  * @openapi
@@ -39,6 +149,7 @@ const orderInclude = {
  *         schema: { type: integer, default: 10 }
  *     responses:
  *       200:
+
  *         description: Danh sách đơn hàng
  */
 router.get("/", authenticate, async (req: Request, res: Response, next: NextFunction) => {
