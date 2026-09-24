@@ -1,6 +1,8 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
+import { getAuctionEligibility } from "../lib/auction-eligibility";
+import { canSell, getSellingUser, sellerBlockedResponse } from "../lib/seller-permissions";
 import { removeSupabaseObjects, uploadToSupabase } from "../lib/supabase-storage";
 import { authenticate } from "../middleware/auth.middleware";
 import {
@@ -63,7 +65,48 @@ const sellerProfileInclude = {
   },
 };
 
+const PREMIUM_MONTHLY_PRICE = Number(process.env.PREMIUM_MONTHLY_PRICE || 75000);
+
+const subscriptionRequestSchema = z.object({
+  plan: z.enum(["PREMIUM"]).optional().default("PREMIUM"),
+  durationMonths: z.coerce.number().int().min(1).max(12).optional().default(1),
+  paymentReference: z.string().trim().max(120).optional(),
+  note: z.string().trim().max(500).optional(),
+});
+
+const subscriptionRequestInclude = {
+  sellerProfile: {
+    select: {
+      id: true,
+      shopName: true,
+      status: true,
+      subscriptionPlan: true,
+      subscriptionExpiresAt: true,
+    },
+  },
+  reviewedByAdmin: {
+    select: { id: true, email: true, name: true },
+  },
+};
+
 router.use(authenticate);
+
+router.get("/auction-eligibility", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const seller = await getSellingUser(req.user!.userId);
+    if (!canSell(seller)) {
+      res.status(403).json(sellerBlockedResponse(seller?.sellerProfile?.status));
+      return;
+    }
+
+    res.json({
+      success: true,
+      ...getAuctionEligibility(seller!.sellerProfile, seller!.role),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 router.get("/application", async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -78,6 +121,112 @@ router.get("/application", async (req: Request, res: Response, next: NextFunctio
     }
 
     res.json({ success: true, application, sellerStatus: application.status });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/subscription", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const seller = await getSellingUser(req.user!.userId);
+    if (!canSell(seller)) {
+      res.status(403).json(sellerBlockedResponse(seller?.sellerProfile?.status));
+      return;
+    }
+
+    const pendingRequest = await prisma.sellerSubscriptionRequest.findFirst({
+      where: {
+        sellerProfileId: seller!.sellerProfile!.id,
+        status: "PENDING",
+      },
+      include: subscriptionRequestInclude,
+      orderBy: { createdAt: "desc" },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        plan: seller!.sellerProfile!.subscriptionPlan,
+        subscriptionExpiresAt: seller!.sellerProfile!.subscriptionExpiresAt,
+        monthlyFreeProductLimit: Number(process.env.FREE_MONTHLY_PRODUCT_LIMIT || 10),
+        premiumMonthlyPrice: PREMIUM_MONTHLY_PRICE,
+        pendingRequest,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/subscription-requests", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const seller = await getSellingUser(req.user!.userId);
+    if (!canSell(seller)) {
+      res.status(403).json(sellerBlockedResponse(seller?.sellerProfile?.status));
+      return;
+    }
+
+    const requests = await prisma.sellerSubscriptionRequest.findMany({
+      where: { sellerProfileId: seller!.sellerProfile!.id },
+      include: subscriptionRequestInclude,
+      orderBy: { createdAt: "desc" },
+      take: 20,
+    });
+
+    res.json({ success: true, data: requests });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/subscription-requests", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const seller = await getSellingUser(req.user!.userId);
+    if (!canSell(seller)) {
+      res.status(403).json(sellerBlockedResponse(seller?.sellerProfile?.status));
+      return;
+    }
+
+    const parsed = subscriptionRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+
+    const existingPending = await prisma.sellerSubscriptionRequest.findFirst({
+      where: {
+        sellerProfileId: seller!.sellerProfile!.id,
+        status: "PENDING",
+      },
+      select: { id: true },
+    });
+
+    if (existingPending) {
+      res.status(409).json({
+        success: false,
+        message: "You already have a pending Premium request",
+        requestId: existingPending.id,
+      });
+      return;
+    }
+
+    const request = await prisma.sellerSubscriptionRequest.create({
+      data: {
+        sellerProfileId: seller!.sellerProfile!.id,
+        plan: "PREMIUM",
+        durationMonths: parsed.data.durationMonths,
+        amount: parsed.data.durationMonths * PREMIUM_MONTHLY_PRICE,
+        paymentReference: parsed.data.paymentReference,
+        note: parsed.data.note,
+      },
+      include: subscriptionRequestInclude,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Premium request submitted",
+      data: request,
+    });
   } catch (err) {
     next(err);
   }

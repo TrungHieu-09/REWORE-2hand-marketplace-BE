@@ -7,8 +7,17 @@ import { canSell, getSellingUser, sellerBlockedResponse } from "../lib/seller-pe
 import { removeSupabaseObjects, uploadToSupabase } from "../lib/supabase-storage";
 import { getProductImageUploadFiles, ProductImageUploadFiles, uploadProductImages } from "../middleware/upload.middleware";
 import { formatProductSeller, publicSellerSelect } from "../lib/public-seller";
+import { isPremiumSellerSubscriptionActive } from "../lib/auction-eligibility";
 
 const router = Router();
+const FREE_MONTHLY_PRODUCT_LIMIT = Number(process.env.FREE_MONTHLY_PRODUCT_LIMIT || 10);
+
+const startOfCurrentMonth = () => {
+  const date = new Date();
+  date.setDate(1);
+  date.setHours(0, 0, 0, 0);
+  return date;
+};
 
 const parseOptionalStringArray = (value: unknown) => {
   if (value === undefined) return undefined;
@@ -152,7 +161,7 @@ router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
     // Tăng view count
     await prisma.product.update({ where: { id: productId }, data: { viewCount: { increment: 1 } } });
 
-    res.json({ success: true, data: product });
+    res.json({ success: true, data: formatProductSeller(product) });
   } catch (err) { next(err); }
 });
 
@@ -190,6 +199,27 @@ router.post("/", authenticate, uploadProductImages, async (req: Request, res: Re
     const parsed = createProductSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors }); return;
+    }
+
+    if (seller?.role !== "ADMIN" && !isPremiumSellerSubscriptionActive(seller?.sellerProfile ?? null)) {
+      const usedThisMonth = await prisma.product.count({
+        where: {
+          sellerId: req.user!.userId,
+          createdAt: { gte: startOfCurrentMonth() },
+        },
+      });
+
+      if (usedThisMonth >= FREE_MONTHLY_PRODUCT_LIMIT) {
+        res.status(403).json({
+          success: false,
+          message: `Gói Free được đăng tối đa ${FREE_MONTHLY_PRODUCT_LIMIT} sản phẩm mỗi tháng. Nâng cấp Premium để đăng không giới hạn.`,
+          requiresPremium: true,
+          currentPlan: seller?.sellerProfile?.subscriptionPlan || "FREE",
+          monthlyLimit: FREE_MONTHLY_PRODUCT_LIMIT,
+          usedThisMonth,
+        });
+        return;
+      }
     }
 
     const uploadedImages = await Promise.all(

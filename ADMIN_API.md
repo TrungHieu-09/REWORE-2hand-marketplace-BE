@@ -77,6 +77,29 @@ Body:
 
 Rejects seller profile, keeps user as `BUYER`, writes history/log, and sends result email.
 
+### PATCH /admin/sellers/:id/subscription
+
+Manual subscription management after admin confirms seller payment.
+
+Body:
+
+```json
+{
+  "plan": "PREMIUM",
+  "expiresAt": "2026-10-21T00:00:00.000Z",
+  "note": "Premium monthly package paid by bank transfer"
+}
+```
+
+Allowed plan:
+
+```txt
+FREE
+PREMIUM
+```
+
+If `plan=FREE`, backend clears `subscriptionExpiresAt`. If `plan=PREMIUM`, `expiresAt` can be omitted/null for no expiry or set to an ISO datetime.
+
 ## Users
 
 ### GET /admin/users
@@ -306,6 +329,9 @@ REPORT_SUSPEND
 REPORT_DISMISS
 ORDER_CONFIRM_PAYMENT
 ORDER_REFUND
+SELLER_SUBSCRIPTION_UPDATE
+SELLER_SUBSCRIPTION_REQUEST_APPROVE
+SELLER_SUBSCRIPTION_REQUEST_REJECT
 ```
 
 ## Selling Permission
@@ -329,4 +355,74 @@ If seller profile is not approved:
   "requiresSellerApproval": true,
   "sellerStatus": "NONE"
 }
+```
+
+## Seller Premium Requests
+
+Seller gửi yêu cầu Premium từ:
+
+```txt
+POST /api/seller/subscription-requests
+```
+
+Admin kiểm tra chuyển khoản thủ công rồi duyệt/từ chối tại các endpoint dưới đây.
+
+### GET /admin/subscription-requests
+
+Query:
+
+```txt
+status=PENDING|APPROVED|REJECTED|ALL
+page=1
+limit=20
+sortBy=createdAt|reviewedAt|status|amount|durationMonths
+sortOrder=desc
+```
+
+Mặc định nếu không truyền `status` thì trả `PENDING`.
+
+### POST /admin/subscription-requests/:id/approve
+
+Body optional:
+
+```json
+{
+  "expiresAt": "2026-10-22T00:00:00.000Z",
+  "note": "Payment confirmed"
+}
+```
+
+Nếu không truyền `expiresAt`, backend tự cộng `durationMonths` vào ngày hiện tại hoặc ngày hết hạn Premium hiện tại nếu seller còn active Premium. Side effects:
+
+```txt
+seller_profiles.subscription_plan=PREMIUM
+seller_profiles.subscription_expires_at=computed expiry
+seller_subscription_requests.status=APPROVED
+AdminActionLog=SELLER_SUBSCRIPTION_REQUEST_APPROVE
+```
+
+### POST /admin/subscription-requests/:id/reject
+
+Body:
+
+```json
+{
+  "reason": "Payment not found"
+}
+```
+
+Side effects:
+
+```txt
+seller_subscription_requests.status=REJECTED
+seller_subscription_requests.rejectedReason=reason
+AdminActionLog=SELLER_SUBSCRIPTION_REQUEST_REJECT
+```
+
+## Seller Package Rules
+
+```txt
+FREE: tối đa 10 sản phẩm/tháng, không được tạo auction
+PREMIUM: đăng sản phẩm không giới hạn, được tạo auction
+ADMIN: bypass điều kiện auction để test/hỗ trợ
 ```

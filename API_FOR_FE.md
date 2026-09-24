@@ -286,6 +286,9 @@ Response:
     "totalSales": 0,
     "totalBids": 0,
     "isVerified": false,
+    "sellerStatus": "NONE",
+    "sellerSubscriptionPlan": "FREE",
+    "sellerSubscriptionExpiresAt": null,
     "createdAt": "2026-09-05T00:00:00.000Z"
   }
 }
@@ -615,6 +618,21 @@ Validate:
 - `startTime`, `endTime`: ISO datetime
 - `endTime` phai sau `startTime`
 
+Seller phai co goi `PREMIUM` dang active de mo dau gia. `ADMIN` duoc bypass dieu kien nay de test/ho tro van hanh.
+
+Response `403` neu seller chua co goi Premium:
+
+```json
+{
+  "success": false,
+  "message": "Cần đăng ký gói PREMIUM để mở đấu giá. Gói hiện tại của bạn: FREE.",
+  "currentPlan": "FREE",
+  "requiredPlan": "PREMIUM",
+  "subscriptionActive": false,
+  "subscriptionExpiresAt": null
+}
+```
+
 Sau khi tao auction, backend update product status thanh `AUCTION`.
 
 ### `PATCH /api/auctions/:id/cancel`
@@ -843,6 +861,9 @@ type User = {
   totalSales: number;
   totalBids: number;
   isVerified: boolean;
+  sellerStatus?: "NONE" | "PENDING" | "APPROVED" | "REJECTED" | "SUSPENDED";
+  sellerSubscriptionPlan?: "FREE" | "PREMIUM";
+  sellerSubscriptionExpiresAt?: string | null;
   createdAt: string;
   updatedAt?: string;
 };
@@ -974,6 +995,34 @@ type WishlistItem = {
 
 ## Seller Application API
 
+### GET /api/seller/auction-eligibility
+
+Auth required. Seller da duoc approve hoac admin. FE dung endpoint nay de hien thi trang thai mo khoa tinh nang dau gia.
+
+Response `200`:
+
+```json
+{
+  "success": true,
+  "eligible": false,
+  "requiredPlan": "PREMIUM",
+  "currentPlan": "FREE",
+  "subscriptionActive": false,
+  "subscriptionExpiresAt": null
+}
+```
+
+Neu user chua phai seller approved, response `403` giong cac API ban hang:
+
+```json
+{
+  "success": false,
+  "message": "Seller profile must be approved before selling",
+  "requiresSellerApproval": true,
+  "sellerStatus": "NONE"
+}
+```
+
 ### GET /api/seller/application
 
 Auth required. Lay ho so seller hien tai cua user dang dang nhap.
@@ -1044,8 +1093,172 @@ FE admin khong nen cache signed URL qua lau. Neu anh het han khi drawer mo lau, 
 
 - Flow register hien tai bat buoc verify OTP truoc khi login. User chua verify se bi xoa sau 6 phut neu khong xac thuc OTP, de email co the dang ky lai. Neu chua cau hinh SMTP, BE se tra `500` voi message `Unable to send OTP email`; local dev van in OTP ra console voi prefix `[DEV OTP]` de debug. Production can cau hinh `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_SECURE`.
 - Backend upload anh CCCD/selfie cho seller application len Supabase Storage bucket private `id-cards`; admin detail tra signed URL 5 phut. Backend upload anh san pham len bucket public `product-images` va luu public URL vao `Product.images`.
-- Hien tai backend chua co API tao order (`POST /api/orders`) va chua co checkout/payment API. Route order chi co list, detail va update status.
+- Backend da co API buyer mua ngay (`POST /api/orders`) cho san pham 2hand quantity=1. Thanh toan van la chuyen khoan/VietQR thu cong, admin xac nhan payment sau.
 - Hien tai backend chua co API ket thuc auction tu dong, chon winner, hay tao order tu auction winner.
 - Hien tai backend chua co route cho review du model Prisma co bang `Review`.
 - Role user mac dinh khi register la `BUYER`; user chi thanh `SELLER` sau khi admin approve seller application.
+- Seller gói `FREE` chỉ được tạo tối đa 10 sản phẩm/tháng. Khi quá giới hạn, `POST /api/products` trả `403` với `requiresPremium: true`. Seller gói `PREMIUM` được đăng không giới hạn và được tạo auction.
 - Nen uu tien dung Swagger JSON `/api-docs.json` neu FE muon generate client tu OpenAPI, nhung docs nay da ghi them cac side effect/constraint trong code.
+
+## Seller Premium Package API
+
+### GET /api/seller/subscription
+
+Auth required. Seller đã approved.
+
+```json
+{
+  "success": true,
+  "data": {
+    "plan": "FREE",
+    "subscriptionExpiresAt": null,
+    "monthlyFreeProductLimit": 10,
+    "premiumMonthlyPrice": 75000,
+    "pendingRequest": null
+  }
+}
+```
+
+### POST /api/seller/subscription-requests
+
+Auth required. Seller gửi yêu cầu đăng ký Premium sau khi chuyển khoản thủ công.
+
+Body:
+
+```json
+{
+  "plan": "PREMIUM",
+  "durationMonths": 1,
+  "paymentReference": "REWORE PREMIUM SHOPABC",
+  "note": "Đã chuyển khoản"
+}
+```
+
+Response `201`:
+
+```json
+{
+  "success": true,
+  "message": "Premium request submitted",
+  "data": {
+    "id": "requestId",
+    "plan": "PREMIUM",
+    "durationMonths": 1,
+    "amount": 75000,
+    "status": "PENDING"
+  }
+}
+```
+
+Nếu đã có request pending, trả `409`.
+
+### GET /api/seller/subscription-requests
+
+Auth required. Trả tối đa 20 yêu cầu gần nhất của seller.
+
+## Product Limit Response
+
+`POST /api/products` khi seller Free đã đủ 10 sản phẩm trong tháng:
+
+```json
+{
+  "success": false,
+  "message": "Gói Free được đăng tối đa 10 sản phẩm mỗi tháng. Nâng cấp Premium để đăng không giới hạn.",
+  "requiresPremium": true,
+  "currentPlan": "FREE",
+  "monthlyLimit": 10,
+  "usedThisMonth": 10
+}
+```
+
+## Cart And Buy Now Flow
+
+Sản phẩm 2hand luôn `quantity = 1`. Giỏ hàng KHÔNG giữ hàng. Nếu buyer A để sản phẩm trong giỏ nhưng buyer B mua trước, item trong giỏ của buyer A vẫn còn nhưng API trả `isAvailable=false` để FE hiện `Hết hàng`.
+
+### GET /api/cart
+
+Auth required.
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "cartItemId",
+      "productId": "productId",
+      "isAvailable": false,
+      "unavailableReason": "SOLD",
+      "product": {
+        "id": "productId",
+        "status": "SOLD",
+        "availabilityStatus": "sold"
+      }
+    }
+  ],
+  "meta": { "total": 1, "page": 1, "limit": 20, "totalPages": 1 }
+}
+```
+
+### POST /api/cart
+
+Body:
+
+```json
+{
+  "productId": "productId"
+}
+```
+
+Chỉ add được khi product đang `status=ACTIVE` và `availabilityStatus=available`. Nếu đã sold/không khả dụng trả `409`.
+
+### DELETE /api/cart/:productId
+
+Xóa item khỏi giỏ hàng.
+
+### GET /api/cart/check/:productId
+
+```json
+{
+  "success": true,
+  "isInCart": true,
+  "item": {
+    "id": "cartItemId",
+    "isAvailable": true,
+    "unavailableReason": null
+  }
+}
+```
+
+### POST /api/orders
+
+Buyer mua ngay một sản phẩm.
+
+Body:
+
+```json
+{
+  "productId": "productId",
+  "shippingAddress": "optional",
+  "note": "optional"
+}
+```
+
+Nếu mua thành công, backend chạy transaction:
+
+```txt
+Product.status=SOLD
+Product.availabilityStatus=sold
+Order.status=PENDING
+Order.paymentStatus=UNPAID
+Xóa item khỏi cart của buyer mua thành công
+```
+
+Nếu người khác đã mua trước, trả `409`:
+
+```json
+{
+  "success": false,
+  "message": "Sản phẩm đã được người khác mua mất",
+  "availabilityStatus": "sold"
+}
+```

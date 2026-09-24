@@ -74,6 +74,17 @@ enum SellerProfileStatus {
   SUSPENDED
 }
 
+enum SellerSubscriptionPlan {
+  FREE
+  PREMIUM
+}
+
+enum SellerSubscriptionRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum ReportTargetType {
   USER
   PRODUCT
@@ -115,48 +126,54 @@ model User {
   updatedAt    DateTime  @updatedAt
 
   // Relations
-  products               Product[]
-  auctions               Auction[]
-  bids                   Bid[]
-  ordersAsBuyer          Order[]               @relation("BuyerOrders")
-  ordersAsSeller         Order[]               @relation("SellerOrders")
-  wishlistItems          WishlistItem[]
-  reviews                Review[]              @relation("ReviewsGiven")
-  reviewsReceived        Review[]              @relation("ReviewsReceived")
-  emailOtps              EmailOtp[]
-  sellerProfile          SellerProfile?        @relation("SellerProfileOwner")
-  reviewedSellerProfiles SellerProfile[]       @relation("SellerProfileReviewer")
-  sellerStatusActions    SellerStatusHistory[] @relation("SellerStatusHistoryActor")
-  reportsMade            Report[]              @relation("ReportsMade")
-  reportsResolved        Report[]              @relation("ReportsResolved")
-  adminActionLogs        AdminActionLog[]      @relation("AdminActionLogs")
+  products                   Product[]
+  auctions                   Auction[]
+  bids                       Bid[]
+  ordersAsBuyer              Order[]                     @relation("BuyerOrders")
+  ordersAsSeller             Order[]                     @relation("SellerOrders")
+  wishlistItems              WishlistItem[]
+  cartItems                  CartItem[]
+  reviews                    Review[]                    @relation("ReviewsGiven")
+  reviewsReceived            Review[]                    @relation("ReviewsReceived")
+  emailOtps                  EmailOtp[]
+  sellerProfile              SellerProfile?              @relation("SellerProfileOwner")
+  reviewedSellerProfiles     SellerProfile[]             @relation("SellerProfileReviewer")
+  sellerStatusActions        SellerStatusHistory[]       @relation("SellerStatusHistoryActor")
+  reportsMade                Report[]                    @relation("ReportsMade")
+  reportsResolved            Report[]                    @relation("ReportsResolved")
+  adminActionLogs            AdminActionLog[]            @relation("AdminActionLogs")
+  sellerSubscriptionRequests SellerSubscriptionRequest[] @relation("SellerSubscriptionRequestReviewer")
 
   @@map("users")
 }
 
 model SellerProfile {
-  id                String              @id @default(cuid())
-  userId            String              @unique
-  shopName          String
-  idCardFrontUrl    String
-  idCardBackUrl     String
-  selfieUrl         String?
-  bankAccountName   String
-  bankAccountNumber String
-  bankName          String
-  pickupAddress     String
-  status            SellerProfileStatus @default(PENDING)
-  rejectedReason    String?
-  reviewedBy        String?
-  reviewedAt        DateTime?
-  createdAt         DateTime            @default(now())
-  updatedAt         DateTime            @updatedAt
+  id                    String                 @id @default(cuid())
+  userId                String                 @unique
+  shopName              String
+  idCardFrontUrl        String
+  idCardBackUrl         String
+  selfieUrl             String?
+  bankAccountName       String
+  bankAccountNumber     String
+  bankName              String
+  pickupAddress         String
+  status                SellerProfileStatus    @default(PENDING)
+  subscriptionPlan      SellerSubscriptionPlan @default(FREE) @map("subscription_plan")
+  subscriptionExpiresAt DateTime?              @map("subscription_expires_at")
+  rejectedReason        String?
+  reviewedBy            String?
+  reviewedAt            DateTime?
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
 
-  user            User                  @relation("SellerProfileOwner", fields: [userId], references: [id], onDelete: Cascade)
-  reviewedByAdmin User?                 @relation("SellerProfileReviewer", fields: [reviewedBy], references: [id])
-  statusHistory   SellerStatusHistory[]
+  user                 User                        @relation("SellerProfileOwner", fields: [userId], references: [id], onDelete: Cascade)
+  reviewedByAdmin      User?                       @relation("SellerProfileReviewer", fields: [reviewedBy], references: [id])
+  statusHistory        SellerStatusHistory[]
+  subscriptionRequests SellerSubscriptionRequest[]
 
   @@index([status])
+  @@index([subscriptionPlan])
   @@index([reviewedBy])
   @@map("seller_profiles")
 }
@@ -176,6 +193,30 @@ model SellerStatusHistory {
   @@index([sellerProfileId])
   @@index([actorId])
   @@map("seller_status_history")
+}
+
+model SellerSubscriptionRequest {
+  id               String                          @id @default(cuid())
+  sellerProfileId  String
+  plan             SellerSubscriptionPlan
+  durationMonths   Int                             @default(1)
+  amount           Float?
+  paymentReference String?
+  note             String?
+  status           SellerSubscriptionRequestStatus @default(PENDING)
+  reviewedBy       String?
+  reviewedAt       DateTime?
+  rejectedReason   String?
+  createdAt        DateTime                        @default(now())
+  updatedAt        DateTime                        @updatedAt
+
+  sellerProfile   SellerProfile @relation(fields: [sellerProfileId], references: [id], onDelete: Cascade)
+  reviewedByAdmin User?         @relation("SellerSubscriptionRequestReviewer", fields: [reviewedBy], references: [id])
+
+  @@index([sellerProfileId])
+  @@index([status])
+  @@index([reviewedBy])
+  @@map("seller_subscription_requests")
 }
 
 model Product {
@@ -203,6 +244,7 @@ model Product {
   auction       Auction?
   orderItems    Order[]
   wishlistItems WishlistItem[]
+  cartItems     CartItem[]
 
   @@map("products")
 }
@@ -325,6 +367,22 @@ model WishlistItem {
 
   @@unique([userId, productId])
   @@map("wishlist_items")
+}
+
+model CartItem {
+  id        String   @id @default(cuid())
+  userId    String
+  productId String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@index([userId])
+  @@index([productId])
+  @@map("cart_items")
 }
 
 model Review {

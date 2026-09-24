@@ -496,6 +496,8 @@ router.get("/me", authenticate, async (req: Request, res: Response, next: NextFu
         sellerProfile: {
           select: {
             status: true,
+            subscriptionPlan: true,
+            subscriptionExpiresAt: true,
             reviewedAt: true,
             rejectedReason: true,
           },
@@ -514,6 +516,8 @@ router.get("/me", authenticate, async (req: Request, res: Response, next: NextFu
       user: {
         ...userWithoutSellerProfile,
         sellerStatus: sellerProfile?.status ?? "NONE",
+        sellerSubscriptionPlan: sellerProfile?.subscriptionPlan ?? "FREE",
+        sellerSubscriptionExpiresAt: sellerProfile?.subscriptionExpiresAt ?? null,
         sellerApprovedAt: sellerProfile?.status === "APPROVED" ? sellerProfile.reviewedAt : null,
         sellerSuspendedReason: sellerProfile?.status === "SUSPENDED" ? sellerProfile.rejectedReason : null,
       },

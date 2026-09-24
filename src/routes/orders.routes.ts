@@ -2,18 +2,48 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { authenticate } from "../middleware/auth.middleware";
 import { prisma } from "../lib/prisma";
+import { uploadToSupabase } from "../lib/supabase-storage";
+import { getPaymentProofUploadFile, PaymentProofUploadFiles, uploadPaymentProofImage } from "../middleware/upload.middleware";
 
 const router = Router();
 
 const updateStatusSchema = z.object({
-  status: z.enum(["PAID", "SHIPPED", "DELIVERED", "CANCELLED", "REFUNDED"]),
+  status: z.enum(["SHIPPED", "DELIVERED", "COMPLETED", "CANCELLED"]),
+});
+
+const createOrderSchema = z.object({
+  productId: z.string().min(1, "productId là bắt buộc"),
+  shippingAddress: z.string().trim().optional(),
+  note: z.string().trim().optional(),
 });
 
 const orderInclude = {
   buyer: { select: { id: true, name: true, avatar: true, email: true } },
   seller: { select: { id: true, name: true, avatar: true, email: true } },
-  product: { select: { id: true, title: true, images: true, category: true, price: true } },
+  product: { select: { id: true, title: true, images: true, category: true, price: true, status: true, availabilityStatus: true } },
   auction: { select: { id: true, currentBid: true, endTime: true } },
+};
+
+const productIsBuyable = (product: { status: string; availabilityStatus: string }) =>
+  product.status === "ACTIVE" && product.availabilityStatus === "available";
+
+const canTransitionOrder = (
+  order: { buyerId: string; sellerId: string; status: string; paymentStatus: string },
+  user: { userId: string; role: string },
+  nextStatus: string
+) => {
+  if (user.role === "ADMIN") return true;
+  if (order.sellerId === user.userId) {
+    return nextStatus === "SHIPPED" && (order.status === "CONFIRMED" || order.status === "PAID") && order.paymentStatus === "PAID";
+  }
+  if (order.buyerId === user.userId) {
+    return (
+      (nextStatus === "CANCELLED" && order.status === "PENDING" && order.paymentStatus === "UNPAID") ||
+      (nextStatus === "DELIVERED" && order.status === "SHIPPED") ||
+      (nextStatus === "COMPLETED" && (order.status === "DELIVERED" || order.status === "SHIPPED"))
+    );
+  }
+  return false;
 };
 
 /**
@@ -64,6 +94,111 @@ router.get("/", authenticate, async (req: Request, res: Response, next: NextFunc
 
 /**
  * @openapi
+ * /api/orders:
+ *   post:
+ *     tags: [Orders]
+ *     summary: Buyer mua ngay một sản phẩm 2hand
+ *     security:
+ *       - bearerAuth: []
+ */
+router.post("/", authenticate, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const parsed = createOrderSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+
+    const product = await prisma.product.findUnique({
+      where: { id: parsed.data.productId },
+      select: {
+        id: true,
+        sellerId: true,
+        price: true,
+        status: true,
+        availabilityStatus: true,
+      },
+    });
+
+    if (!product) {
+      res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" });
+      return;
+    }
+
+    if (product.sellerId === req.user!.userId) {
+      res.status(400).json({ success: false, message: "Không thể mua sản phẩm của chính bạn" });
+      return;
+    }
+
+    if (!productIsBuyable(product)) {
+      res.status(409).json({
+        success: false,
+        message: "Sản phẩm đã hết hàng hoặc không còn khả dụng",
+        productStatus: product.status,
+        availabilityStatus: product.availabilityStatus,
+      });
+      return;
+    }
+
+    const order = await prisma.$transaction(async (tx) => {
+      const lockedProduct = await tx.product.updateMany({
+        where: {
+          id: product.id,
+          status: "ACTIVE",
+          availabilityStatus: "available",
+        },
+        data: {
+          status: "SOLD",
+          availabilityStatus: "sold",
+        },
+      });
+
+      if (lockedProduct.count !== 1) return null;
+
+      const created = await tx.order.create({
+        data: {
+          buyerId: req.user!.userId,
+          sellerId: product.sellerId,
+          productId: product.id,
+          totalPrice: product.price,
+          shippingFee: 0,
+          paymentStatus: "UNPAID",
+          status: "PENDING",
+          shippingAddress: parsed.data.shippingAddress,
+          note: parsed.data.note,
+        },
+        include: orderInclude,
+      });
+
+      await tx.cartItem.deleteMany({
+        where: {
+          userId: req.user!.userId,
+          productId: product.id,
+        },
+      });
+
+      return created;
+    });
+
+    if (!order) {
+      res.status(409).json({
+        success: false,
+        message: "Sản phẩm đã được người khác mua mất",
+        availabilityStatus: "sold",
+      });
+      return;
+    }
+
+    res.status(201).json({
+      success: true,
+      message: "Đã tạo đơn hàng. Vui lòng chuyển khoản để admin xác nhận thanh toán.",
+      data: order,
+    });
+  } catch (err) { next(err); }
+});
+
+/**
+ * @openapi
  * /api/orders/{id}:
  *   get:
  *     tags: [Orders]
@@ -92,6 +227,41 @@ router.get("/:id", authenticate, async (req: Request, res: Response, next: NextF
       res.status(403).json({ success: false, message: "Không có quyền xem đơn hàng này" }); return;
     }
     res.json({ success: true, data: order });
+  } catch (err) { next(err); }
+});
+
+router.post("/:id/payment-proof", authenticate, uploadPaymentProofImage, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const orderId = String(req.params.id);
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    if (!order) { res.status(404).json({ success: false, message: "Đơn hàng không tìm thấy" }); return; }
+    if (order.buyerId !== req.user!.userId) {
+      res.status(403).json({ success: false, message: "Chỉ buyer của đơn hàng mới được gửi chứng từ thanh toán" });
+      return;
+    }
+    if (order.paymentStatus !== "UNPAID" || order.status !== "PENDING") {
+      res.status(409).json({ success: false, message: "Đơn hàng này không còn chờ thanh toán" });
+      return;
+    }
+
+    const proofFile = getPaymentProofUploadFile(req.files as PaymentProofUploadFiles | undefined);
+    if (!proofFile) {
+      res.status(400).json({ success: false, message: "Payment proof image is required" });
+      return;
+    }
+
+    const proof = await uploadToSupabase(proofFile, "product-images", "payment-proofs");
+    const updated = await prisma.order.update({
+      where: { id: orderId },
+      data: { qrCodeRef: proof.publicUrl || proof.path },
+      include: orderInclude,
+    });
+
+    res.json({
+      success: true,
+      message: "Đã gửi chứng từ thanh toán. Admin sẽ xác nhận sau khi kiểm tra.",
+      data: updated,
+    });
   } catch (err) { next(err); }
 });
 
@@ -143,30 +313,37 @@ router.patch("/:id/status", authenticate, async (req: Request, res: Response, ne
     }
 
     const { status } = parsed.data;
+    if (!canTransitionOrder(order, req.user!, status)) {
+      res.status(403).json({ success: false, message: "Không được phép chuyển đơn hàng sang trạng thái này" });
+      return;
+    }
+
     const now = new Date();
     const timeFields = {
-      ...(status === "PAID" && { paidAt: now }),
       ...(status === "SHIPPED" && { shippedAt: now }),
-      ...(status === "DELIVERED" && { deliveredAt: now }),
-    };
-    const paymentFields = {
-      ...(status === "PAID" && { paymentStatus: "PAID" as const }),
-      ...(status === "REFUNDED" && { paymentStatus: "REFUNDED" as const }),
+      ...((status === "DELIVERED" || status === "COMPLETED") && { deliveredAt: now }),
     };
 
     const updated = await prisma.order.update({
       where: { id: orderId },
-      data: { status, ...timeFields, ...paymentFields },
+      data: { status, ...timeFields },
       include: orderInclude,
     });
 
     // Nếu delivered → tăng totalSales cho seller
-    if (status === "DELIVERED") {
+    if ((status === "DELIVERED" || status === "COMPLETED") && order.status !== "DELIVERED" && order.status !== "COMPLETED") {
       await prisma.user.update({ where: { id: order.sellerId }, data: { totalSales: { increment: 1 } } });
       // Cập nhật product status sang SOLD
       if (order.productId) {
-        await prisma.product.update({ where: { id: order.productId }, data: { status: "SOLD" } });
+        await prisma.product.update({ where: { id: order.productId }, data: { status: "SOLD", availabilityStatus: "sold" } });
       }
+    }
+
+    if (status === "CANCELLED" && order.productId) {
+      await prisma.product.update({
+        where: { id: order.productId },
+        data: { status: "ACTIVE", availabilityStatus: "available" },
+      });
     }
 
     res.json({ success: true, message: "Cập nhật trạng thái thành công", data: updated });
