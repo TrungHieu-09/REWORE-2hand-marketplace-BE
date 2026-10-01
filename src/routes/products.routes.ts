@@ -1,13 +1,13 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
-import { authenticate } from "../middleware/auth.middleware";
+import { authenticate, optionalAuthenticate } from "../middleware/auth.middleware";
 import { prisma } from "../lib/prisma";
 import { Prisma } from ".prisma/client";
-import { canSell, getSellingUser, sellerBlockedResponse } from "../lib/seller-permissions";
 import { removeSupabaseObjects, uploadToSupabase } from "../lib/supabase-storage";
 import { getProductImageUploadFiles, ProductImageUploadFiles, uploadProductImages } from "../middleware/upload.middleware";
 import { formatProductSeller, publicSellerSelect } from "../lib/public-seller";
 import { isPremiumSellerSubscriptionActive } from "../lib/auction-eligibility";
+import { getSellerAccessContext } from "../lib/seller-staff";
 
 const router = Router();
 const FREE_MONTHLY_PRODUCT_LIMIT = Number(process.env.FREE_MONTHLY_PRODUCT_LIMIT || 10);
@@ -96,17 +96,27 @@ const productInclude = {
  *       200:
  *         description: Danh sách sản phẩm
  */
-router.get("/", async (req: Request, res: Response, next: NextFunction) => {
+router.get("/", optionalAuthenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const page = Math.max(1, parseInt(String(req.query.page || 1)));
     const limit = Math.min(50, parseInt(String(req.query.limit || 12)));
     const { category, condition, minPrice, maxPrice, search, sellerId, sortBy } = req.query;
+    const requestedSellerId = sellerId ? String(sellerId) : undefined;
+    const sellerAccess = req.user && requestedSellerId
+      ? (await getSellerAccessContext(req.user.userId, "VIEW_DASHBOARD")) ??
+        (await getSellerAccessContext(req.user.userId, "MANAGE_PRODUCTS"))
+      : null;
+    const canViewSellerInventory = Boolean(
+      requestedSellerId &&
+      sellerAccess &&
+      (sellerAccess.isAdmin || sellerAccess.sellerId === requestedSellerId)
+    );
 
     const where: Prisma.ProductWhereInput = {
-      status: "ACTIVE",
+      ...(canViewSellerInventory ? {} : { status: "ACTIVE" as const }),
       ...(category && { category: category as string }),
       ...(condition && { condition: condition as Prisma.EnumProductConditionFilter }),
-      ...(sellerId && { sellerId: sellerId as string }),
+      ...(requestedSellerId && { sellerId: requestedSellerId }),
       ...(minPrice || maxPrice ? { price: { ...(minPrice && { gte: Number(minPrice) }), ...(maxPrice && { lte: Number(maxPrice) }) } } : {}),
       ...(search && {
         OR: [
@@ -190,9 +200,9 @@ router.post("/", authenticate, uploadProductImages, async (req: Request, res: Re
   const uploadedProductPaths: string[] = [];
 
   try {
-    const seller = await getSellingUser(req.user!.userId);
-    if (!canSell(seller)) {
-      res.status(403).json(sellerBlockedResponse(seller?.sellerProfile?.status));
+    const sellerAccess = await getSellerAccessContext(req.user!.userId, "MANAGE_PRODUCTS");
+    if (!sellerAccess) {
+      res.status(403).json({ success: false, message: "Không có quyền quản lý sản phẩm" });
       return;
     }
 
@@ -201,10 +211,10 @@ router.post("/", authenticate, uploadProductImages, async (req: Request, res: Re
       res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors }); return;
     }
 
-    if (seller?.role !== "ADMIN" && !isPremiumSellerSubscriptionActive(seller?.sellerProfile ?? null)) {
+    if (!sellerAccess.isAdmin && !isPremiumSellerSubscriptionActive(sellerAccess.sellerProfile ?? null)) {
       const usedThisMonth = await prisma.product.count({
         where: {
-          sellerId: req.user!.userId,
+          sellerId: sellerAccess.sellerId,
           createdAt: { gte: startOfCurrentMonth() },
         },
       });
@@ -214,7 +224,7 @@ router.post("/", authenticate, uploadProductImages, async (req: Request, res: Re
           success: false,
           message: `Gói Free được đăng tối đa ${FREE_MONTHLY_PRODUCT_LIMIT} sản phẩm mỗi tháng. Nâng cấp Premium để đăng không giới hạn.`,
           requiresPremium: true,
-          currentPlan: seller?.sellerProfile?.subscriptionPlan || "FREE",
+          currentPlan: sellerAccess.sellerProfile?.subscriptionPlan || "FREE",
           monthlyLimit: FREE_MONTHLY_PRODUCT_LIMIT,
           usedThisMonth,
         });
@@ -236,7 +246,7 @@ router.post("/", authenticate, uploadProductImages, async (req: Request, res: Re
     ];
 
     const product = await prisma.product.create({
-      data: { ...parsed.data, images, sellerId: req.user!.userId },
+      data: { ...parsed.data, images, sellerId: sellerAccess.sellerId },
       include: productInclude,
     });
     res.status(201).json({ success: true, data: formatProductSeller(product) });
@@ -277,15 +287,15 @@ router.put("/:id", authenticate, uploadProductImages, async (req: Request, res: 
 
   try {
     const productId = String(req.params.id);
-    const seller = await getSellingUser(req.user!.userId);
-    if (!seller) {
-      res.status(401).json({ success: false, message: "Unauthorized" });
+    const sellerAccess = await getSellerAccessContext(req.user!.userId, "MANAGE_PRODUCTS");
+    if (!sellerAccess) {
+      res.status(403).json({ success: false, message: "Không có quyền quản lý sản phẩm" });
       return;
     }
 
     const existing = await prisma.product.findUnique({ where: { id: productId } });
     if (!existing) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
-    if (seller.role !== "ADMIN" && (existing.sellerId !== req.user!.userId || !canSell(seller))) {
+    if (!sellerAccess.isAdmin && existing.sellerId !== sellerAccess.sellerId) {
       res.status(403).json({ success: false, message: "Không có quyền sửa sản phẩm này" }); return;
     }
     const parsed = updateProductSchema.safeParse(req.body);
@@ -335,15 +345,15 @@ router.put("/:id", authenticate, uploadProductImages, async (req: Request, res: 
 router.delete("/:id", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const productId = String(req.params.id);
-    const seller = await getSellingUser(req.user!.userId);
-    if (!seller) {
-      res.status(401).json({ success: false, message: "Unauthorized" });
+    const sellerAccess = await getSellerAccessContext(req.user!.userId, "MANAGE_PRODUCTS");
+    if (!sellerAccess) {
+      res.status(403).json({ success: false, message: "Không có quyền quản lý sản phẩm" });
       return;
     }
 
     const existing = await prisma.product.findUnique({ where: { id: productId } });
     if (!existing) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
-    if (seller.role !== "ADMIN" && (existing.sellerId !== req.user!.userId || !canSell(seller))) {
+    if (!sellerAccess.isAdmin && existing.sellerId !== sellerAccess.sellerId) {
       res.status(403).json({ success: false, message: "Không có quyền xóa sản phẩm này" }); return;
     }
     await prisma.product.delete({ where: { id: productId } });

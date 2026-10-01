@@ -4,22 +4,25 @@ import { authenticate } from "../middleware/auth.middleware";
 import { prisma } from "../lib/prisma";
 import { uploadToSupabase } from "../lib/supabase-storage";
 import { getPaymentProofUploadFile, PaymentProofUploadFiles, uploadPaymentProofImage } from "../middleware/upload.middleware";
+import { getSellerAccessContext } from "../lib/seller-staff";
 
 const router = Router();
 
 const updateStatusSchema = z.object({
-  status: z.enum(["SHIPPED", "DELIVERED", "COMPLETED", "CANCELLED"]),
+  status: z.enum(["CONFIRMED", "SHIPPED", "DELIVERED", "COMPLETED", "CANCELLED"]),
 });
 
 const createOrderSchema = z.object({
   productId: z.string().min(1, "productId là bắt buộc"),
-  shippingAddress: z.string().trim().optional(),
+  receiverName: z.string().trim().min(2, "Tên người nhận là bắt buộc"),
+  receiverPhone: z.string().trim().min(8, "Số điện thoại người nhận là bắt buộc"),
+  shippingAddress: z.string().trim().min(5, "Địa chỉ nhận hàng là bắt buộc"),
   note: z.string().trim().optional(),
 });
 
 const orderInclude = {
-  buyer: { select: { id: true, name: true, avatar: true, email: true } },
-  seller: { select: { id: true, name: true, avatar: true, email: true } },
+  buyer: { select: { id: true, name: true, avatar: true, email: true, phone: true } },
+  seller: { select: { id: true, name: true, avatar: true, email: true, phone: true } },
   product: { select: { id: true, title: true, images: true, category: true, price: true, status: true, availabilityStatus: true } },
   auction: { select: { id: true, currentBid: true, endTime: true } },
 };
@@ -27,14 +30,24 @@ const orderInclude = {
 const productIsBuyable = (product: { status: string; availabilityStatus: string }) =>
   product.status === "ACTIVE" && product.availabilityStatus === "available";
 
+const buildShippingSnapshot = (payload: z.infer<typeof createOrderSchema>) =>
+  [
+    `Người nhận: ${payload.receiverName}`,
+    `SĐT: ${payload.receiverPhone}`,
+    `Địa chỉ: ${payload.shippingAddress}`,
+  ].join("\n");
+
 const canTransitionOrder = (
   order: { buyerId: string; sellerId: string; status: string; paymentStatus: string },
-  user: { userId: string; role: string },
+  user: { userId: string; role: string; sellerId?: string },
   nextStatus: string
 ) => {
   if (user.role === "ADMIN") return true;
-  if (order.sellerId === user.userId) {
-    return nextStatus === "SHIPPED" && (order.status === "CONFIRMED" || order.status === "PAID") && order.paymentStatus === "PAID";
+  if (order.sellerId === (user.sellerId ?? user.userId)) {
+    return (
+      (nextStatus === "CONFIRMED" && order.status === "PENDING") ||
+      (nextStatus === "SHIPPED" && ["CONFIRMED", "PAID"].includes(order.status))
+    );
   }
   if (order.buyerId === user.userId) {
     return (
@@ -60,7 +73,7 @@ const canTransitionOrder = (
  *         schema: { type: string, enum: [buyer, seller], default: buyer }
  *       - in: query
  *         name: status
- *         schema: { type: string, enum: [PENDING, PAID, SHIPPED, DELIVERED, CANCELLED, REFUNDED] }
+ *         schema: { type: string, enum: [PENDING, CONFIRMED, PAID, SHIPPED, DELIVERED, COMPLETED, CANCELLED, REFUNDED] }
  *       - in: query
  *         name: page
  *         schema: { type: integer, default: 1 }
@@ -77,10 +90,16 @@ router.get("/", authenticate, async (req: Request, res: Response, next: NextFunc
     const limit = Math.min(50, parseInt(String(req.query.limit || 10)));
     const role = req.query.role || "buyer";
     const status = req.query.status as string | undefined;
+    const sellerAccess = role === "seller" ? await getSellerAccessContext(req.user!.userId, "MANAGE_ORDERS") : null;
+
+    if (role === "seller" && !sellerAccess) {
+      res.status(403).json({ success: false, message: "Không có quyền quản lý đơn hàng" });
+      return;
+    }
 
     const where = {
-      ...(role === "seller" ? { sellerId: req.user!.userId } : { buyerId: req.user!.userId }),
-      ...(status && { status: status as "PENDING" | "PAID" | "SHIPPED" | "DELIVERED" | "CANCELLED" | "REFUNDED" }),
+      ...(role === "seller" ? { sellerId: sellerAccess!.sellerId } : { buyerId: req.user!.userId }),
+      ...(status && { status: status as "PENDING" | "CONFIRMED" | "PAID" | "SHIPPED" | "DELIVERED" | "COMPLETED" | "CANCELLED" | "REFUNDED" }),
     };
 
     const [data, total] = await Promise.all([
@@ -100,6 +119,29 @@ router.get("/", authenticate, async (req: Request, res: Response, next: NextFunc
  *     summary: Buyer mua ngay một sản phẩm 2hand
  *     security:
  *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [productId, receiverName, receiverPhone, shippingAddress]
+ *             properties:
+ *               productId:
+ *                 type: string
+ *               receiverName:
+ *                 type: string
+ *                 example: Nguyễn Văn A
+ *               receiverPhone:
+ *                 type: string
+ *                 example: "0901234567"
+ *               shippingAddress:
+ *                 type: string
+ *                 example: 12 Nguyễn Huệ, Quận 1, TP.HCM
+ *               note:
+ *                 type: string
+ *                 nullable: true
+ *                 example: Giao giờ hành chính
  */
 router.post("/", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -164,7 +206,7 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
           shippingFee: 0,
           paymentStatus: "UNPAID",
           status: "PENDING",
-          shippingAddress: parsed.data.shippingAddress,
+          shippingAddress: buildShippingSnapshot(parsed.data),
           note: parsed.data.note,
         },
         include: orderInclude,
@@ -223,7 +265,9 @@ router.get("/:id", authenticate, async (req: Request, res: Response, next: NextF
     const orderId = String(req.params.id);
     const order = await prisma.order.findUnique({ where: { id: orderId }, include: orderInclude });
     if (!order) { res.status(404).json({ success: false, message: "Đơn hàng không tìm thấy" }); return; }
-    if (order.buyerId !== req.user!.userId && order.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
+    const sellerAccess = await getSellerAccessContext(req.user!.userId, "MANAGE_ORDERS");
+    const canViewAsSeller = Boolean(sellerAccess && order.sellerId === sellerAccess.sellerId);
+    if (order.buyerId !== req.user!.userId && !canViewAsSeller && req.user!.role !== "ADMIN") {
       res.status(403).json({ success: false, message: "Không có quyền xem đơn hàng này" }); return;
     }
     res.json({ success: true, data: order });
@@ -288,7 +332,7 @@ router.post("/:id/payment-proof", authenticate, uploadPaymentProofImage, async (
  *             properties:
  *               status:
  *                 type: string
- *                 enum: [PAID, SHIPPED, DELIVERED, CANCELLED, REFUNDED]
+ *                 enum: [CONFIRMED, SHIPPED, DELIVERED, COMPLETED, CANCELLED]
  *     responses:
  *       200:
  *         description: Cập nhật thành công
@@ -300,7 +344,8 @@ router.patch("/:id/status", authenticate, async (req: Request, res: Response, ne
     if (!order) { res.status(404).json({ success: false, message: "Đơn hàng không tìm thấy" }); return; }
 
     const isBuyer = order.buyerId === req.user!.userId;
-    const isSeller = order.sellerId === req.user!.userId;
+    const sellerAccess = await getSellerAccessContext(req.user!.userId, "MANAGE_ORDERS");
+    const isSeller = Boolean(sellerAccess && order.sellerId === sellerAccess.sellerId);
     const isAdmin = req.user!.role === "ADMIN";
 
     if (!isBuyer && !isSeller && !isAdmin) {
@@ -313,7 +358,7 @@ router.patch("/:id/status", authenticate, async (req: Request, res: Response, ne
     }
 
     const { status } = parsed.data;
-    if (!canTransitionOrder(order, req.user!, status)) {
+    if (!canTransitionOrder(order, { ...req.user!, sellerId: sellerAccess?.sellerId }, status)) {
       res.status(403).json({ success: false, message: "Không được phép chuyển đơn hàng sang trạng thái này" });
       return;
     }
@@ -330,7 +375,7 @@ router.patch("/:id/status", authenticate, async (req: Request, res: Response, ne
       include: orderInclude,
     });
 
-    // Nếu delivered → tăng totalSales cho seller
+    // Khi buyer xác nhận đã nhận hàng hoặc hoàn tất đơn → tăng totalSales cho seller.
     if ((status === "DELIVERED" || status === "COMPLETED") && order.status !== "DELIVERED" && order.status !== "COMPLETED") {
       await prisma.user.update({ where: { id: order.sellerId }, data: { totalSales: { increment: 1 } } });
       // Cập nhật product status sang SOLD

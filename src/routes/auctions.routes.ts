@@ -2,9 +2,9 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { authenticate } from "../middleware/auth.middleware";
 import { prisma } from "../lib/prisma";
-import { canSell, getSellingUser, sellerBlockedResponse } from "../lib/seller-permissions";
 import { formatProductSeller, formatPublicSeller, publicSellerSelect } from "../lib/public-seller";
 import { getAuctionEligibility } from "../lib/auction-eligibility";
+import { getSellerAccessContext } from "../lib/seller-staff";
 
 const router = Router();
 
@@ -192,9 +192,9 @@ router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
  */
 router.post("/", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const seller = await getSellingUser(req.user!.userId);
-    if (!canSell(seller)) {
-      res.status(403).json(sellerBlockedResponse(seller?.sellerProfile?.status));
+    const sellerAccess = await getSellerAccessContext(req.user!.userId, "MANAGE_AUCTIONS");
+    if (!sellerAccess) {
+      res.status(403).json({ success: false, message: "Không có quyền quản lý đấu giá" });
       return;
     }
 
@@ -211,7 +211,7 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
     // Verify product belongs to this seller
     const product = await prisma.product.findUnique({ where: { id: productId } });
     if (!product) { res.status(404).json({ success: false, message: "Sản phẩm không tìm thấy" }); return; }
-    if (product.sellerId !== req.user!.userId && seller?.role !== "ADMIN") {
+    if (product.sellerId !== sellerAccess.sellerId && !sellerAccess.isAdmin) {
       res.status(403).json({ success: false, message: "Sản phẩm không thuộc về bạn" }); return;
     }
     if (product.status !== "ACTIVE" || product.availabilityStatus !== "available") {
@@ -224,7 +224,7 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
       return;
     }
 
-    const auctionEligibility = getAuctionEligibility(seller?.sellerProfile ?? null, seller?.role ?? req.user!.role);
+    const auctionEligibility = getAuctionEligibility(sellerAccess.sellerProfile ?? null, sellerAccess.isAdmin ? "ADMIN" : req.user!.role);
     if (!auctionEligibility.eligible) {
       res.status(403).json({
         success: false,
@@ -240,7 +240,7 @@ router.post("/", authenticate, async (req: Request, res: Response, next: NextFun
     const status = new Date(startTime) <= new Date() ? "LIVE" : "UPCOMING";
 
     const auction = await prisma.auction.create({
-      data: { productId, sellerId: req.user!.userId, startPrice, currentBid: startPrice, minIncrement, startTime: new Date(startTime), endTime: new Date(endTime), status },
+      data: { productId, sellerId: sellerAccess.sellerId, startPrice, currentBid: startPrice, minIncrement, startTime: new Date(startTime), endTime: new Date(endTime), status },
       include: auctionInclude,
     });
 
@@ -256,11 +256,12 @@ router.post("/:id/close", authenticate, async (req: Request, res: Response, next
     const auctionId = String(req.params.id);
     const auction = await prisma.auction.findUnique({ where: { id: auctionId } });
     if (!auction) { res.status(404).json({ success: false, message: "Phiên đấu giá không tìm thấy" }); return; }
-    if (auction.sellerId !== req.user!.userId && req.user!.role !== "ADMIN") {
+    const sellerAccess = await getSellerAccessContext(req.user!.userId, "MANAGE_AUCTIONS");
+    if (!sellerAccess || (auction.sellerId !== sellerAccess.sellerId && !sellerAccess.isAdmin)) {
       res.status(403).json({ success: false, message: "Không có quyền kết thúc phiên đấu giá này" });
       return;
     }
-    if (auction.endTime > new Date() && req.user!.role !== "ADMIN") {
+    if (auction.endTime > new Date() && !sellerAccess.isAdmin) {
       res.status(409).json({ success: false, message: "Chưa đến thời gian kết thúc đấu giá" });
       return;
     }
@@ -295,15 +296,15 @@ router.post("/:id/close", authenticate, async (req: Request, res: Response, next
 router.patch("/:id/cancel", authenticate, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const auctionId = String(req.params.id);
-    const seller = await getSellingUser(req.user!.userId);
-    if (!seller) {
-      res.status(401).json({ success: false, message: "Unauthorized" });
+    const sellerAccess = await getSellerAccessContext(req.user!.userId, "MANAGE_AUCTIONS");
+    if (!sellerAccess) {
+      res.status(403).json({ success: false, message: "Không có quyền quản lý đấu giá" });
       return;
     }
 
     const auction = await prisma.auction.findUnique({ where: { id: auctionId } });
     if (!auction) { res.status(404).json({ success: false, message: "Phiên đấu giá không tìm thấy" }); return; }
-    if (seller.role !== "ADMIN" && (auction.sellerId !== req.user!.userId || !canSell(seller))) {
+    if (!sellerAccess.isAdmin && auction.sellerId !== sellerAccess.sellerId) {
       res.status(403).json({ success: false, message: "Không có quyền hủy phiên đấu giá này" }); return;
     }
     if (auction.status === "ENDED" || auction.status === "CANCELLED") {

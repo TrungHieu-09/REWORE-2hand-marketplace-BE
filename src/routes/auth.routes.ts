@@ -7,6 +7,7 @@ import { authenticate } from "../middleware/auth.middleware";
 import { prisma } from "../lib/prisma";
 import { sendOtpEmail } from "../lib/email";
 import { cleanupExpiredPendingRegistrations } from "../lib/pending-registration-cleanup";
+import { appendSellerStaffAccess } from "../lib/seller-staff";
 
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || "rewore_secret_key_change_in_prod";
@@ -294,7 +295,7 @@ router.post("/login", async (req: Request, res: Response, next: NextFunction) =>
     const token = createJwtToken(user);
 
     const { password: _pwd, ...userWithoutPassword } = user;
-    res.json({ success: true, token, user: userWithoutPassword });
+    res.json({ success: true, token, user: await appendSellerStaffAccess(userWithoutPassword) });
   } catch (err) {
     next(err);
   }
@@ -388,7 +389,7 @@ router.post("/verify-otp", async (req: Request, res: Response, next: NextFunctio
 
     const token = createJwtToken(verifiedUser);
 
-    res.json({ success: true, token, user: verifiedUser });
+    res.json({ success: true, token, user: await appendSellerStaffAccess(verifiedUser) });
   } catch (err) {
     next(err);
   }
@@ -511,16 +512,18 @@ router.get("/me", authenticate, async (req: Request, res: Response, next: NextFu
     }
 
     const { sellerProfile, ...userWithoutSellerProfile } = user;
+    const authUser = {
+      ...userWithoutSellerProfile,
+      sellerStatus: sellerProfile?.status ?? "NONE",
+      sellerSubscriptionPlan: sellerProfile?.subscriptionPlan ?? "FREE",
+      sellerSubscriptionExpiresAt: sellerProfile?.subscriptionExpiresAt ?? null,
+      sellerApprovedAt: sellerProfile?.status === "APPROVED" ? sellerProfile.reviewedAt : null,
+      sellerSuspendedReason: sellerProfile?.status === "SUSPENDED" ? sellerProfile.rejectedReason : null,
+    };
+
     res.json({
       success: true,
-      user: {
-        ...userWithoutSellerProfile,
-        sellerStatus: sellerProfile?.status ?? "NONE",
-        sellerSubscriptionPlan: sellerProfile?.subscriptionPlan ?? "FREE",
-        sellerSubscriptionExpiresAt: sellerProfile?.subscriptionExpiresAt ?? null,
-        sellerApprovedAt: sellerProfile?.status === "APPROVED" ? sellerProfile.reviewedAt : null,
-        sellerSuspendedReason: sellerProfile?.status === "SUSPENDED" ? sellerProfile.rejectedReason : null,
-      },
+      user: await appendSellerStaffAccess(authUser),
     });
   } catch (err) {
     next(err);
