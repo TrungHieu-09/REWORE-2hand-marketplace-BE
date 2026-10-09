@@ -35,6 +35,11 @@ const productImagesUpload = createImageUpload(8).fields([
   { name: "productImages", maxCount: 8 },
 ]);
 
+const paymentProofUpload = createImageUpload(1).fields([
+  { name: "paymentProof", maxCount: 1 },
+  { name: "proof", maxCount: 1 },
+]);
+
 export type SellerIdentityUploadFiles = Partial<
   Record<
     "id_card_front" | "id_card_back" | "selfie" | "idCardFrontImage" | "idCardBackImage" | "selfieImage",
@@ -49,6 +54,7 @@ export type SellerIdentityUploadFileSet = {
 };
 
 export type ProductImageUploadFiles = Partial<Record<"images" | "productImages", Express.Multer.File[]>>;
+export type PaymentProofUploadFiles = Partial<Record<"paymentProof" | "proof", Express.Multer.File[]>>;
 
 const runUpload = (
   uploadHandler: ReturnType<ReturnType<typeof createImageUpload>["fields"]>,
@@ -80,6 +86,10 @@ export const uploadProductImages = (req: Request, res: Response, next: NextFunct
   runUpload(productImagesUpload, req, res, next);
 };
 
+export const uploadPaymentProofImage = (req: Request, res: Response, next: NextFunction) => {
+  runUpload(paymentProofUpload, req, res, next);
+};
+
 export const getSellerIdentityUploadFiles = (files?: SellerIdentityUploadFiles): SellerIdentityUploadFileSet => ({
   idCardFrontFile: files?.id_card_front?.[0] ?? files?.idCardFrontImage?.[0],
   idCardBackFile: files?.id_card_back?.[0] ?? files?.idCardBackImage?.[0],
@@ -90,3 +100,6 @@ export const getProductImageUploadFiles = (files?: ProductImageUploadFiles) => [
   ...(files?.productImages ?? []),
   ...(files?.images ?? []),
 ];
+
+export const getPaymentProofUploadFile = (files?: PaymentProofUploadFiles) =>
+  files?.paymentProof?.[0] ?? files?.proof?.[0];

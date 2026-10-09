@@ -8,6 +8,8 @@ import {
   ReportResolutionAction,
   ReportStatus,
   ReportTargetType,
+  SellerSubscriptionPlan,
+  SellerSubscriptionRequestStatus,
   SellerProfileStatus,
 } from ".prisma/client";
 import { authenticate, requireRole } from "../middleware/auth.middleware";
@@ -26,6 +28,17 @@ const reasonSchema = z.object({
 
 const resolveReportSchema = z.object({
   action: z.enum(["warn", "suspend", "dismiss"]),
+  note: z.string().trim().optional(),
+});
+
+const sellerSubscriptionSchema = z.object({
+  plan: z.enum(["FREE", "PREMIUM"]),
+  expiresAt: z.string().datetime().nullable().optional(),
+  note: z.string().trim().optional(),
+});
+
+const approveSubscriptionRequestSchema = z.object({
+  expiresAt: z.string().datetime().optional(),
   note: z.string().trim().optional(),
 });
 
@@ -109,6 +122,20 @@ const mapReportStatus = (value?: unknown): ReportStatus | undefined => {
     : undefined;
 };
 
+const mapSubscriptionRequestStatus = (value?: unknown): SellerSubscriptionRequestStatus | undefined => {
+  if (!value) return undefined;
+  const normalized = String(value).trim().toUpperCase();
+  return Object.values(SellerSubscriptionRequestStatus).includes(normalized as SellerSubscriptionRequestStatus)
+    ? (normalized as SellerSubscriptionRequestStatus)
+    : undefined;
+};
+
+const addMonths = (value: Date, months: number) => {
+  const date = new Date(value);
+  date.setMonth(date.getMonth() + months);
+  return date;
+};
+
 const withSignedSellerIdentityUrls = async <T extends {
   idCardFrontUrl: string;
   idCardBackUrl: string;
@@ -163,6 +190,15 @@ const orderInclude = {
 const reportInclude = {
   reporter: { select: { id: true, email: true, name: true } },
   resolvedByAdmin: { select: { id: true, email: true, name: true } },
+};
+
+const subscriptionRequestInclude = {
+  sellerProfile: {
+    include: {
+      user: { select: { id: true, email: true, name: true, phone: true, role: true, isBanned: true } },
+    },
+  },
+  reviewedByAdmin: { select: { id: true, email: true, name: true } },
 };
 
 const getSellerUserIdFromReportTarget = async (report: {
@@ -387,6 +423,207 @@ router.post("/sellers/:id/reject", async (req: Request, res: Response, next: Nex
   }
 });
 
+router.patch("/sellers/:id/subscription", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const parsed = sellerSubscriptionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+
+    const sellerId = String(req.params.id);
+    const existing = await prisma.sellerProfile.findUnique({ where: { id: sellerId } });
+    if (!existing) {
+      res.status(404).json({ success: false, message: "Seller profile not found" });
+      return;
+    }
+
+    const subscriptionPlan = parsed.data.plan as SellerSubscriptionPlan;
+    const subscriptionExpiresAt = subscriptionPlan === "FREE"
+      ? null
+      : parsed.data.expiresAt
+        ? new Date(parsed.data.expiresAt)
+        : null;
+
+    const seller = await prisma.$transaction(async (tx) => {
+      const updated = await tx.sellerProfile.update({
+        where: { id: sellerId },
+        data: {
+          subscriptionPlan,
+          subscriptionExpiresAt,
+        },
+        include: sellerProfileInclude,
+      });
+
+      await createAdminActionLog(tx, {
+        adminId: req.user!.userId,
+        actionType: "SELLER_SUBSCRIPTION_UPDATE",
+        targetType: "SELLER_PROFILE",
+        targetId: sellerId,
+        note: parsed.data.note || `Set seller subscription to ${subscriptionPlan}`,
+      });
+
+      return updated;
+    });
+
+    res.json({ success: true, message: "Seller subscription updated", data: seller });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/subscription-requests", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const listQuery = getListQuery(req, res, ["createdAt", "reviewedAt", "status", "amount", "durationMonths"]);
+    if (!listQuery) return;
+    const { page, limit, sortBy, sortOrder } = listQuery;
+    const rawStatus = req.query.status ? String(req.query.status).trim().toUpperCase() : undefined;
+    const status = rawStatus === "ALL" ? undefined : mapSubscriptionRequestStatus(rawStatus) || "PENDING";
+    const where: Prisma.SellerSubscriptionRequestWhereInput = status ? { status } : {};
+
+    const [data, total] = await Promise.all([
+      prisma.sellerSubscriptionRequest.findMany({
+        where,
+        include: subscriptionRequestInclude,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: orderBy(sortBy, sortOrder) as Prisma.SellerSubscriptionRequestOrderByWithRelationInput,
+      }),
+      prisma.sellerSubscriptionRequest.count({ where }),
+    ]);
+
+    res.json({ success: true, data, meta: meta(total, page, limit) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/subscription-requests/:id/approve", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const parsed = approveSubscriptionRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+
+    const requestId = String(req.params.id);
+    const existing = await prisma.sellerSubscriptionRequest.findUnique({
+      where: { id: requestId },
+      include: { sellerProfile: true },
+    });
+
+    if (!existing) {
+      res.status(404).json({ success: false, message: "Subscription request not found" });
+      return;
+    }
+
+    if (existing.status !== "PENDING") {
+      res.status(409).json({ success: false, message: "Subscription request is not pending" });
+      return;
+    }
+
+    const now = new Date();
+    const baseDate = existing.sellerProfile.subscriptionExpiresAt && existing.sellerProfile.subscriptionExpiresAt > now
+      ? existing.sellerProfile.subscriptionExpiresAt
+      : now;
+    const subscriptionExpiresAt = parsed.data.expiresAt
+      ? new Date(parsed.data.expiresAt)
+      : addMonths(baseDate, existing.durationMonths);
+
+    const request = await prisma.$transaction(async (tx) => {
+      await tx.sellerProfile.update({
+        where: { id: existing.sellerProfileId },
+        data: {
+          subscriptionPlan: "PREMIUM",
+          subscriptionExpiresAt,
+        },
+      });
+
+      const updated = await tx.sellerSubscriptionRequest.update({
+        where: { id: requestId },
+        data: {
+          status: "APPROVED",
+          reviewedBy: req.user!.userId,
+          reviewedAt: now,
+        },
+        include: subscriptionRequestInclude,
+      });
+
+      await createAdminActionLog(tx, {
+        adminId: req.user!.userId,
+        actionType: "SELLER_SUBSCRIPTION_REQUEST_APPROVE",
+        targetType: "SELLER_SUBSCRIPTION_REQUEST",
+        targetId: requestId,
+        note: parsed.data.note || `Approved ${existing.plan} for ${existing.durationMonths} month(s)`,
+      });
+
+      return updated;
+    });
+
+    res.json({
+      success: true,
+      message: "Seller Premium request approved",
+      data: request,
+      subscriptionExpiresAt,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/subscription-requests/:id/reject", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const parsed = reasonSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: "Validation error", errors: parsed.error.flatten().fieldErrors });
+      return;
+    }
+
+    const requestId = String(req.params.id);
+    const existing = await prisma.sellerSubscriptionRequest.findUnique({ where: { id: requestId } });
+    if (!existing) {
+      res.status(404).json({ success: false, message: "Subscription request not found" });
+      return;
+    }
+
+    if (existing.status !== "PENDING") {
+      res.status(409).json({ success: false, message: "Subscription request is not pending" });
+      return;
+    }
+
+    const request = await prisma.$transaction(async (tx) => {
+      const updated = await tx.sellerSubscriptionRequest.update({
+        where: { id: requestId },
+        data: {
+          status: "REJECTED",
+          reviewedBy: req.user!.userId,
+          reviewedAt: new Date(),
+          rejectedReason: parsed.data.reason,
+        },
+        include: subscriptionRequestInclude,
+      });
+
+      await createAdminActionLog(tx, {
+        adminId: req.user!.userId,
+        actionType: "SELLER_SUBSCRIPTION_REQUEST_REJECT",
+        targetType: "SELLER_SUBSCRIPTION_REQUEST",
+        targetId: requestId,
+        note: parsed.data.reason,
+      });
+
+      return updated;
+    });
+
+    res.json({
+      success: true,
+      message: "Seller Premium request rejected",
+      data: request,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get("/users", async (req: Request, res: Response, next: NextFunction) => {
   try {
     const listQuery = getListQuery(req, res, ["createdAt", "email", "name", "role"]);
@@ -429,6 +666,8 @@ router.get("/users", async (req: Request, res: Response, next: NextFunction) => 
               id: true,
               shopName: true,
               status: true,
+              subscriptionPlan: true,
+              subscriptionExpiresAt: true,
               pickupAddress: true,
               bankName: true,
               bankAccountName: true,
@@ -548,7 +787,7 @@ router.get("/products", async (req: Request, res: Response, next: NextFunction) 
               email: true,
               name: true,
               role: true,
-              sellerProfile: { select: { shopName: true, status: true } },
+              sellerProfile: { select: { shopName: true, status: true, subscriptionPlan: true, subscriptionExpiresAt: true } },
             },
           },
         },
@@ -887,6 +1126,13 @@ router.post("/orders/:id/refund", async (req: Request, res: Response, next: Next
         include: orderInclude,
       });
 
+      if (existing.productId) {
+        await tx.product.update({
+          where: { id: existing.productId },
+          data: { status: "ACTIVE", availabilityStatus: "available" },
+        });
+      }
+
       await createAdminActionLog(tx, {
         adminId: req.user!.userId,
         actionType: "ORDER_REFUND",
@@ -1005,7 +1251,7 @@ router.get("/stats/top-sellers", async (req: Request, res: Response, next: NextF
         email: true,
         name: true,
         reputation: true,
-        sellerProfile: { select: { shopName: true, status: true } },
+        sellerProfile: { select: { shopName: true, status: true, subscriptionPlan: true, subscriptionExpiresAt: true } },
       },
     });
     const sellerById = new Map(sellers.map((seller) => [seller.id, seller]));

@@ -267,7 +267,11 @@ Hầu hết các endpoint yêu cầu **Bearer JWT Token**.
               type: "string",
               enum: ["PENDING", "PAID", "SHIPPED", "DELIVERED", "CANCELLED", "REFUNDED"],
             },
-            shippingAddress: { type: "string", nullable: true },
+            shippingAddress: {
+              type: "string",
+              nullable: true,
+              description: "Snapshot thông tin giao hàng tại thời điểm đặt: người nhận, SĐT, địa chỉ.",
+            },
             note: { type: "string", nullable: true },
             product: { $ref: "#/components/schemas/Product" },
             buyer: { $ref: "#/components/schemas/User" },

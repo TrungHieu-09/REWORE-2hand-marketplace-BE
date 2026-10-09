@@ -53,6 +53,33 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
   }
 };
 
+export const optionalAuthenticate = async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    next();
+    return;
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+      select: { id: true, email: true, role: true, isBanned: true },
+    });
+
+    if (user && !user.isBanned) {
+      req.user = { userId: user.id, email: user.email, role: user.role };
+    }
+  } catch {
+    // Public endpoints should keep working even when an optional token is stale.
+  }
+
+  next();
+};
+
 export const requireRole = (...roles: string[]) => {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (!req.user) {

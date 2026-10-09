@@ -3,7 +3,13 @@ import { prisma } from "./prisma";
 export type SellingUser = {
   id: string;
   role: string;
-  sellerProfile: { status: string } | null;
+  sellerProfile: {
+    id: string;
+    shopName: string;
+    status: string;
+    subscriptionPlan: string;
+    subscriptionExpiresAt: Date | null;
+  } | null;
 };
 
 export const getSellingUser = (userId: string): Promise<SellingUser | null> =>
@@ -12,7 +18,15 @@ export const getSellingUser = (userId: string): Promise<SellingUser | null> =>
     select: {
       id: true,
       role: true,
-      sellerProfile: { select: { status: true } },
+      sellerProfile: {
+        select: {
+          id: true,
+          shopName: true,
+          status: true,
+          subscriptionPlan: true,
+          subscriptionExpiresAt: true,
+        },
+      },
     },
   });
 
